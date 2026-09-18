@@ -18,7 +18,9 @@
     "jsonwebtoken": "^9.0.3",
     "ldapts": "^9.0.0",
     "mssql": "^12.5.5",
-    "oracledb": "^7.0.0"
+    "oracledb": "^7.0.0",
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

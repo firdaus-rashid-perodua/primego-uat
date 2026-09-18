@@ -69,6 +69,157 @@ async function logAuditTrail(username, status) {
     }
 }
 
+/**
+ * @openapi
+ * /from-mssql:
+ *   get:
+ *     summary: MSSQL connection test
+ *     description: Retrieves data from the MS SQL instance.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved data.
+ *       500:
+ *         description: Database connection or query error.
+ */
+router.get('/from-mssql', async (req, res) => {
+    try {
+        const pool = await getMssqlPool();
+        const result = await pool.request().query(`SELECT TOP 1 1 as MSSQL
+        FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]`);
+        //res.json(result.recordset);
+
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+/**
+ * @openapi
+ * /from-oracle:
+ *   get:
+ *     summary: ORACLE connection test
+ *     description: Retrieves data from the MS SQL instance.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved data.
+ *       500:
+ *         description: Database connection or query error.
+ */
+router.get('/from-oracle', async (req, res) => {
+    try {
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+
+        const result = await conn.execute(`
+            select 1 as oracle from bma_configuration_master where rownum = 1
+            `,
+            [], // Bind variables (empty array since you don't have any)
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+
+        await conn.close();
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+/**
+ * @openapi
+ * /login-direct:
+ *   post:
+ *     summary: Active Directory / LDAP Login protocol
+ *     description: Authenticates a user against the corporate LDAP directory after verifying registration status in the Oracle database.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - username
+ *               - password
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 description: The user's corporate username or email address.
+ *                 example: m2 username
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 description: The user's plaintext Windows/LDAP password.
+ *                 example: P@ssword123
+ *     responses:
+ *       200:
+ *         description: Authentication successful.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Login successful
+ *       400:
+ *         description: Bad Request. Missing parameters.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: Username and password are required
+ *       401:
+ *         description: Unauthorized. Account is not registered or active.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: User account not registered in PRIME GO.
+ *       500:
+ *         description: Internal Server Error. Database or system failure.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: Database error during user verification
+ */
 router.post('/login-direct', async (req, res) => {
     let { username, password } = req.body;
     let useremail = username;
@@ -219,70 +370,6 @@ router.post('/login-direct', async (req, res) => {
     } */
 });
 
-
-router.get('/from-mssql', async (req, res) => {
-    try {
-        const pool = await getMssqlPool();
-        const result = await pool.request().query(`SELECT TOP (10) [SALES_CENTER_CODE]
-            ,[SALES_CENTER_NAME]
-            ,[SALES_CENTER_TYPE]
-            ,[BOOKING_DATE]
-            ,[REG_NO]
-            ,[REG_DATE]
-            ,[CUSTOMER_OLD_IC_NO]
-            ,[CUSTOMER_NEW_IC_NO]
-            ,[CUSTOMER_NAME]
-            ,[FMC_ID]
-            ,[JPJ_MODEL_DESCRIPTION]
-            ,[CUSTOMER_NUMBER]
-            ,[EXTRACTION_DATE]
-        FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]`);
-        //res.json(result.recordset);
-
-        res.status(200).json({
-            success: true,
-            count: result.recordset.length,
-            data: result.recordset
-        });
-    } catch (err) {
-        res.status(500).json({
-            success: false,
-            message: 'Database query execution failed',
-            error: err.message
-        });
-    }
-
-});
-
-
-router.get('/from-oracle', async (req, res) => {
-    try {
-        const pool = await getOraclePool();   // pool object
-        const conn = await pool.getConnection();
-
-        const result = await conn.execute(`
-            select userid, username from users
-            where groupid = 'ITSTF'
-            and userstatus = 'ACT'
-            `,
-            [], // Bind variables (empty array since you don't have any)
-            { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-
-        await conn.close();
-        //res.json(result.rows);
-        res.status(200).json({
-            success: true,
-            count: result.rows.length,
-            data: result.rows
-        });
-    } catch (err) {
-        console.error('Oracle error:', err);
-        res.status(500).json({ error: err + '. Oracle query failed' });
-    }
-});
-
-
 router.get('/test/get-users', async (req, res) => {
     try {
         const pool = await getOraclePool();   // pool object
@@ -305,6 +392,19 @@ router.get('/test/get-users', async (req, res) => {
 
 
 // start BMA (PRIME-GO) query
+
+/**
+ * @openapi
+ * /api/dashboard/ack_registration:
+ *   get:
+ *     summary: ACK submission
+ *     description: Retrieves data from the MS SQL instance.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved data.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/ack_registration', async (req, res) => {
     try {
 
@@ -347,6 +447,18 @@ WHERE doc_type = 'EDAFTAR'
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/year_regActual:
+ *   get:
+ *     summary: Registration - Yearly Actual
+ *     description: Retrieves data from the MS SQL instance.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved data.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/year_regActual', async (req, res) => {
 
     const { year } = req.query;
@@ -410,6 +522,18 @@ router.get('/api/dashboard/year_regTarget2', async (req, res) => {
 
 });
 
+/**
+ * @openapi
+ * /api/dashboard/year_regTarget:
+ *   get:
+ *     summary: Registration - Yearly Target
+ *     description: Retrieves data from the MS SQL instance.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved data.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/year_regTarget', async (req, res) => {
     try {
 
