@@ -340,7 +340,7 @@ router.post('/login-direct', async (req, res) => {
         return res.json({
             success: true,
             message: 'Login successful',
-            // user: searchEntries
+            // user: userObj
             user: [{
                 email: username,
                 name: displayName // Your mobile frontend can map directly to 'name'
@@ -370,28 +370,51 @@ router.post('/login-direct', async (req, res) => {
     } */
 });
 
-router.get('/test/get-users', async (req, res) => {
+
+// start BMA (PRIME-GO) query
+
+
+router.get('/api/user-access', async (req, res) => {
     try {
+
+        const { username } = req.query;
+
+        // username = 'firdaus.rashid@perodua.com.my'
+        const user_name = username || '';
+        const username1 = user_name.split('@')[0];
+
+
+        const startTime = performance.now();
         const pool = await getOraclePool();   // pool object
         const conn = await pool.getConnection();
-
         const result = await conn.execute(`
-      select userid, username from users
-      where groupid = 'ITSTF'
-      and userstatus = 'ACT'
-    `);
-
+select login_id as users, acl_registration, acl_booking, acl_parts, acl_service 
+from bma_users
+where upper(login_id) = upper(:username)
+and record_status = 'E'
+            `,
+            {
+                username: username1
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
         await conn.close();
-        res.json(result.rows);
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/user-access Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
     } catch (err) {
         console.error('Oracle error:', err);
-        res.status(500).json({ error: 'Oracle query failed' });
+        res.status(500).json({ error: err + '. Oracle query failed' });
     }
 });
 
 
-
-// start BMA (PRIME-GO) query
 
 /**
  * @openapi
@@ -446,6 +469,188 @@ WHERE doc_type = 'EDAFTAR'
     }
 });
 
+router.get('/api/dashboard/ack_registration_temp', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+SELECT 'ACK' as STATUS, to_number(sectionvalue) as AMOUNT
+FROM bma_configuration_master
+WHERE configtype = 'ACK_EDAFTA'
+and sectionname = 'ACK_EDAFTAR'
+and recordstatus = 'E'
+            `,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_temp  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+router.get('/api/dashboard/ack_registration_outlet_list', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  a.chassis_no ,a.sales_center_code,b.fmr_id,a.jpj_status
+from vsales.sndsv_jpj_transactions a, dna.sndsd_vehicles b
+where a.jpj_status = 'ACK'
+and a.chassis_no = b.chassis_number
+--and a.creation_date >= trunc(sysdate)
+--and a.creation_date < trunc(sysdate) + 1
+and a.creation_date >= '28-may-2026'
+and a.creation_date < '29-may-2026'
+--and a.sales_center_code = ''
+and a.indicator = '0'
+            `,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_temp  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+router.get('/api/dashboard/ack_registration_outlet', async (req, res) => {
+    try {
+
+        const { outletcode } = req.query;
+
+        const outletCode = outletcode || '121178';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PERODUA\s*|\s*\(NEW\)$', '', 1, 0, 'i') AS MODEL, count(*) as TOTAL_ACK
+from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
+where jpj.jpj_status = 'ACK'
+and jpj.chassis_no = veh.chassis_number
+--and a.creation_date >= trunc(sysdate)
+--and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= '28-may-2026'
+and jpj.creation_date < '29-may-2026'
+and jpj.indicator = '0'
+and jpj.sales_center_code = :outletcode
+AND veh.fmr_id = a.id
+AND a.vcl_code = b.vcl_code
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA\s*|\s*\(NEW\)$', '', 1, 0, 'i')
+            `,
+            {
+                outletcode: outletCode
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_outlet  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+router.get('/api/dashboard/ack_registration_list_outlet', async (req, res) => {
+    try {
+
+        const { outletcode } = req.query;
+
+        const outletCode = outletcode || '121178';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  jpj.sales_center_code as outlet_code, count(*) as total_ack
+from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
+where jpj.jpj_status = 'ACK'
+and jpj.chassis_no = veh.chassis_number
+and jpj.creation_date >= '28-may-2026'
+and jpj.creation_date < '29-may-2026'
+and jpj.indicator = '0'
+--and jpj.sales_center_code = :outletcode
+AND veh.fmr_id = a.id
+AND a.vcl_code = b.vcl_code
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+GROUP BY jpj.sales_center_code
+            `,
+            // {
+            //     outletcode: outletCode
+            // },
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_list_outlet  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
 
 /**
  * @openapi
@@ -473,7 +678,7 @@ router.get('/api/dashboard/year_regActual', async (req, res) => {
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regActual");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regActual  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -491,7 +696,7 @@ router.get('/api/dashboard/year_regActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/year_regTarget2', async (req, res) => {
+router.get('/api/dashboard/year_regTarget_2', async (req, res) => {
 
     const { year } = req.query;
     const parsedYear = year || '2025';
@@ -499,14 +704,14 @@ router.get('/api/dashboard/year_regTarget2', async (req, res) => {
     try {
         const startTime = performance.now();
         const pool = await getMssqlPool();
-        const result = await pool.request().input('yearParam', parseInt(parsedYear)).query(`SELECT SUM(Target) as 'target_reg_year'
+        const result = await pool.request().input('yearParam', parseInt(parsedYear)).query(`SELECT SUM(Target) as 'TARGET_REG_YEAR'
     FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
     WHERE  YEAR = @yearParam
     AND Parameter = 'New Car Reg'`);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regTarget");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regTarget  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -953,7 +1158,7 @@ RegistrationSummary AS (
         ON r.JPJ_MODEL_DESCRIPTION LIKE '%' + t.Model + '%'
     WHERE MONTH(r.REG_DATE) = @monthParam
       AND YEAR(r.REG_DATE) = @yearParam
-      AND r.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
+      --AND r.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
     GROUP BY t.Model
 )
 -- Step 3: Combine everything and calculate all required percentages safely
@@ -1181,7 +1386,7 @@ ActualData AS (
               AND YEAR(AC2.REG_DATE) = @yearParam
               AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
               AND AC2.JPJ_MODEL_DESCRIPTION LIKE '%' + t.[MODEL] + '%'
-              AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
+              --AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
         ) AS REG_COUNT
     FROM TargetData t
 )
@@ -1311,7 +1516,7 @@ ActualData AS (
               AND YEAR(AC2.REG_DATE) = @yearParam
               AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
               AND AC2.JPJ_MODEL_DESCRIPTION LIKE '%' + t.[MODEL] + '%'
-              AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
+              --AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
         ) AS REG_COUNT
     FROM TargetData t
 ),
