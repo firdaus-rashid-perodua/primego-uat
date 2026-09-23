@@ -551,6 +551,57 @@ and a.indicator = '0'
     }
 });
 
+
+router.get('/api/dashboard/ack_registration_region', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  'ACK' as status, outl.region, outl.region_2, count(*) as total_ack
+from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, bma_outlet_type outl, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e
+where jpj.jpj_status = 'ACK'
+and jpj.chassis_no = veh.chassis_number
+--and a.creation_date >= trunc(sysdate)
+--and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= '28-may-2026'
+and jpj.creation_date < '29-may-2026'
+and jpj.indicator = '0'
+and jpj.sales_center_code = outl.sls_code
+--and jpj.sales_center_code = :outletcode
+AND veh.fmr_id = a.id
+AND a.vcl_code = b.vcl_code
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+group by outl.region, outl.region_2
+            `,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_temp  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
 router.get('/api/dashboard/ack_registration_outlet', async (req, res) => {
     try {
 
@@ -563,7 +614,7 @@ router.get('/api/dashboard/ack_registration_outlet', async (req, res) => {
         const pool = await getOraclePool();   // pool object
         const conn = await pool.getConnection();
         const result = await conn.execute(`
-select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PERODUA\s*|\s*\(NEW\)$', '', 1, 0, 'i') AS MODEL, count(*) as TOTAL_ACK
+select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i') AS MODEL, count(*) as TOTAL_ACK
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
@@ -578,7 +629,7 @@ AND a.vcl_code = b.vcl_code
 AND a.fml_id = c.id
 AND e.vfp_id = d.id
 AND c.vfy_id = e.id 
-GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA\s*|\s*\(NEW\)$', '', 1, 0, 'i')
+GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i')
             `,
             {
                 outletcode: outletCode
@@ -588,6 +639,107 @@ GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA\s*|\s*\(
         await conn.close();
         const duration = (performance.now() - startTime).toFixed(2);
         console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_outlet  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+
+router.get('/api/dashboard/ack_registration_model', async (req, res) => {
+    try {
+
+        const { outletcode } = req.query;
+
+        const outletCode = outletcode || '121178';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i') AS MODEL, count(*) as TOTAL_ACK
+from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
+where jpj.jpj_status = 'ACK'
+and jpj.chassis_no = veh.chassis_number
+--and a.creation_date >= trunc(sysdate)
+--and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= '28-may-2026'
+and jpj.creation_date < '29-may-2026'
+and jpj.indicator = '0'
+--and jpj.sales_center_code = :outletcode
+AND veh.fmr_id = a.id
+AND a.vcl_code = b.vcl_code
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+GROUP BY REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i')
+            `,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_model  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+router.get('/api/dashboard/ack_registration_model_outlet', async (req, res) => {
+    try {
+
+        const { outletcode } = req.query;
+
+        const outletCode = outletcode || '121178';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i') AS MODEL, count(*) as TOTAL_ACK
+from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
+where jpj.jpj_status = 'ACK'
+and jpj.chassis_no = veh.chassis_number
+--and a.creation_date >= trunc(sysdate)
+--and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= '28-may-2026'
+and jpj.creation_date < '29-may-2026'
+and jpj.indicator = '0'
+and jpj.sales_center_code = :outletcode
+AND veh.fmr_id = a.id
+AND a.vcl_code = b.vcl_code
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 'i')
+            `,
+            {
+                outletcode: outletCode,
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration_model  Params: " + JSON.stringify(req.query));
 
         //res.json(result.rows);
         res.status(200).json({
