@@ -11,10 +11,11 @@ const { getOraclePool } = require('../db/oracle');
 const oracledb = require('oracledb');
 const { parse } = require('dotenv');
 const { Client } = require('ldapts');
-// const jwt = require('jsonwebtoken');
+const jwt = require('jsonwebtoken');
 // const crypto = require('crypto');
 
 const router = express.Router();
+const authenticate = require('../middleware/authenticate');
 
 
 const algorithm = 'aes-256-gcm';
@@ -81,7 +82,7 @@ async function logAuditTrail(username, status) {
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/from-mssql', async (req, res) => {
+router.get('/from-mssql', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT TOP 1 1 as MSSQL
@@ -115,7 +116,7 @@ router.get('/from-mssql', async (req, res) => {
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/from-oracle', async (req, res) => {
+router.get('/from-oracle', authenticate, async (req, res) => {
     try {
         const pool = await getOraclePool();   // pool object
         const conn = await pool.getConnection();
@@ -337,9 +338,17 @@ router.post('/login-direct', async (req, res) => {
             }
         }
 
+        //JWT Token assign after success LDAP
+        const token = jwt.sign(
+            { username },
+            process.env.JWT_SECRET,
+            { expiresIn: '8h' }
+        );
+
         return res.json({
             success: true,
             message: 'Login successful',
+            token,
             // user: userObj
             user: [{
                 email: username,
@@ -374,7 +383,7 @@ router.post('/login-direct', async (req, res) => {
 // start BMA (PRIME-GO) query
 
 
-router.get('/api/user-access', async (req, res) => {
+router.get('/api/user-access', authenticate, async (req, res) => {
     try {
 
         const { username } = req.query;
@@ -428,14 +437,13 @@ and record_status = 'E'
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/api/dashboard/ack_registration', async (req, res) => {
+router.get('/api/dashboard/ack_registration', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
 
         const parsedMonth = month || '05';
         const parsedYear = year || '2025';
-
 
         const startTime = performance.now();
         const pool = await getOraclePool();   // pool object
@@ -469,7 +477,7 @@ WHERE doc_type = 'EDAFTAR'
     }
 });
 
-router.get('/api/dashboard/ack_registration_temp', async (req, res) => {
+router.get('/api/dashboard/ack_registration_temp', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -508,7 +516,7 @@ and recordstatus = 'E'
 });
 
 
-router.get('/api/dashboard/ack_registration_outlet_list', async (req, res) => {
+router.get('/api/dashboard/ack_registration_outlet_list', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -552,7 +560,7 @@ and a.indicator = '0'
 });
 
 
-router.get('/api/dashboard/ack_registration_region', async (req, res) => {
+router.get('/api/dashboard/ack_registration_region', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -602,7 +610,7 @@ group by outl.region, outl.region_2
     }
 });
 
-router.get('/api/dashboard/ack_registration_outlet', async (req, res) => {
+router.get('/api/dashboard/ack_registration_outlet', authenticate, async (req, res) => {
     try {
 
         const { outletcode } = req.query;
@@ -654,7 +662,7 @@ GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* 
 
 
 
-router.get('/api/dashboard/ack_registration_model', async (req, res) => {
+router.get('/api/dashboard/ack_registration_model', authenticate, async (req, res) => {
     try {
 
         const { outletcode } = req.query;
@@ -703,7 +711,7 @@ GROUP BY REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 
 });
 
 
-router.get('/api/dashboard/ack_registration_model_outlet', async (req, res) => {
+router.get('/api/dashboard/ack_registration_model_outlet', authenticate, async (req, res) => {
     try {
 
         const { outletcode } = req.query;
@@ -754,7 +762,7 @@ GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* 
 });
 
 
-router.get('/api/dashboard/ack_registration_list_outlet', async (req, res) => {
+router.get('/api/dashboard/ack_registration_list_outlet', authenticate, async (req, res) => {
     try {
 
         const { outletcode } = req.query;
@@ -816,7 +824,7 @@ GROUP BY jpj.sales_center_code
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/api/dashboard/year_regActual', async (req, res) => {
+router.get('/api/dashboard/year_regActual', authenticate, async (req, res) => {
 
     const { year } = req.query;
     const parsedYear = year || '2025';
@@ -848,7 +856,7 @@ router.get('/api/dashboard/year_regActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/year_regTarget_2', async (req, res) => {
+router.get('/api/dashboard/year_regTarget_2', authenticate, async (req, res) => {
 
     const { year } = req.query;
     const parsedYear = year || '2025';
@@ -891,7 +899,7 @@ router.get('/api/dashboard/year_regTarget_2', async (req, res) => {
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/api/dashboard/year_regTarget', async (req, res) => {
+router.get('/api/dashboard/year_regTarget', authenticate, async (req, res) => {
     try {
 
         const { year } = req.query;
@@ -931,7 +939,7 @@ and attr1 = :year
 });
 
 
-router.get('/api/dashboard/mnt_regActual', async (req, res) => {
+router.get('/api/dashboard/mnt_regActual', authenticate, async (req, res) => {
     try {
 
         // 1. Get query parameters from the request URL
@@ -969,7 +977,7 @@ router.get('/api/dashboard/mnt_regActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_regTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_regTarget', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
 
@@ -1008,7 +1016,7 @@ WHERE YEAR = @yearParam
 });
 
 
-router.get('/api/dashboard/mnt_bookActual', async (req, res) => {
+router.get('/api/dashboard/mnt_bookActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT COUNT(*) as 'total_book_month'
@@ -1034,7 +1042,7 @@ router.get('/api/dashboard/mnt_bookActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_bookTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_bookTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT SUM(Target) as 'target_book_month'
@@ -1063,7 +1071,7 @@ router.get('/api/dashboard/mnt_bookTarget', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_serviceActual', async (req, res) => {
+router.get('/api/dashboard/mnt_serviceActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_month'
@@ -1089,7 +1097,7 @@ router.get('/api/dashboard/mnt_serviceActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_serviceTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_serviceTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT SUM(Target) as 'target_reg_month'
@@ -1117,7 +1125,7 @@ router.get('/api/dashboard/mnt_serviceTarget', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_partActual', async (req, res) => {
+router.get('/api/dashboard/mnt_partActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_month'
@@ -1143,7 +1151,7 @@ router.get('/api/dashboard/mnt_partActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_partTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_partTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT SUM(Target) as 'target_reg_month'
@@ -1172,7 +1180,7 @@ router.get('/api/dashboard/mnt_partTarget', async (req, res) => {
 
 
 // List actual monthly registration by month
-router.get('/api/registration/mnt_listActual', async (req, res) => {
+router.get('/api/registration/mnt_listActual', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
 
@@ -1273,7 +1281,7 @@ ORDER BY
 
 
 // List actual monthly registration by month (Model)
-router.get('/api/registration/mnt_listActualModel', async (req, res) => {
+router.get('/api/registration/mnt_listActualModel', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
 
@@ -1363,7 +1371,7 @@ ORDER BY ACTUAL_REG_COUNT DESC;
 
 
 // List actual monthly registration by month (Outlets)
-router.get('/api/registration/mnt_listRegionOutlet', async (req, res) => {
+router.get('/api/registration/mnt_listRegionOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region } = req.query;
 
@@ -1484,7 +1492,7 @@ ORDER BY REG_PCTG_2 DESC;
 
 
 // List actual monthly registration by month (Outlets)
-router.get('/api/registration/mnt_listModelOutlet', async (req, res) => {
+router.get('/api/registration/mnt_listModelOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region, outletcode } = req.query;
 
@@ -1620,7 +1628,7 @@ ORDER BY REG_PCTG_2 DESC;
 
 
 // List actual model monthly registration by month bu outlet
-router.get('/api/registration/mnt_outletModelResult', async (req, res) => {
+router.get('/api/registration/mnt_outletModelResult', authenticate, async (req, res) => {
     try {
 
         const { month, year, region, outletcode } = req.query;
@@ -1746,7 +1754,7 @@ FROM SummaryData s;
 
 
 // List actual monthly registration by month (Outlets)
-router.get('/api/registration/mnt_RegionOutletSummary', async (req, res) => {
+router.get('/api/registration/mnt_RegionOutletSummary', authenticate, async (req, res) => {
     try {
         const { month, year, region } = req.query;
 
@@ -1855,7 +1863,7 @@ WHERE RowNum = 1;
 });
 
 
-router.get('/api/dashboard/server_test', async (req, res) => {
+router.get('/api/dashboard/server_test', authenticate, async (req, res) => {
     try {
         const startTime = performance.now();
         const pool = await getMssqlPool();
@@ -1886,7 +1894,7 @@ router.get('/api/dashboard/server_test', async (req, res) => {
 
 // Booking
 
-router.get('/api/dashboard/mnt_bkgActual', async (req, res) => {
+router.get('/api/dashboard/mnt_bkgActual', authenticate, async (req, res) => {
     try {
 
         // 1. Get query parameters from the request URL
@@ -1945,7 +1953,7 @@ FROM (
 
 
 //booking target
-router.get('/api/dashboard/mnt_bkgTarget2', async (req, res) => {
+router.get('/api/dashboard/mnt_bkgTarget2', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -1988,7 +1996,7 @@ router.get('/api/dashboard/mnt_bkgTarget2', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/mnt_bkgTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_bkgTarget', authenticate, async (req, res) => {
     try {
 
         // 1. Get query parameters from the request URL
@@ -2035,7 +2043,7 @@ WHERE YEAR = @yearParam
 
 
 //booking List
-router.get('/api/booking/mnt_ListActual', async (req, res) => {
+router.get('/api/booking/mnt_ListActual', authenticate, async (req, res) => {
     try {
 
         // 1. Get query parameters from the request URL
@@ -2156,7 +2164,7 @@ ORDER BY
 
 });
 
-router.get('/api/booking/mnt_ListActualx', async (req, res) => {
+router.get('/api/booking/mnt_ListActualx', authenticate, async (req, res) => {
     let oracleConn;
     try {
         const { month, year } = req.query;
@@ -2283,7 +2291,7 @@ ORDER BY
 });
 
 
-router.get('/api/booking/mnt_ListActual_temp', async (req, res) => {
+router.get('/api/booking/mnt_ListActual_temp', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -2358,7 +2366,7 @@ GROUP BY
 });
 
 
-router.get('/api/booking/mnt_ListActual_ora', async (req, res) => {
+router.get('/api/booking/mnt_ListActual_ora', authenticate, async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -2470,7 +2478,7 @@ ORDER BY region
 });
 
 
-router.get('/api/booking/mnt_listRegionOutlet', async (req, res) => {
+router.get('/api/booking/mnt_listRegionOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region } = req.query;
 
@@ -2605,7 +2613,7 @@ ORDER BY BKG_PCTG_2 DESC;
 
 
 /*
-router.get('/api/booking/mnt_listRegionOutlet_ora', async (req, res) => {
+router.get('/api/booking/mnt_listRegionOutlet_ora',authenticate, async (req, res) => {
     try {
 
         const { month, year, region } = req.query;
@@ -2668,7 +2676,7 @@ ORDER BY ACTUAL_BKG_COUNT DESC
 });
 */
 
-router.get('/api/booking/mnt_listModelOutlet', async (req, res) => {
+router.get('/api/booking/mnt_listModelOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region, outletcode } = req.query;
 
@@ -2910,7 +2918,7 @@ ORDER BY BKG_PCTG_2 DESC;
 
 
 /*
-router.get('/api/booking/mnt_listModelOutlet_ora', async (req, res) => {
+router.get('/api/booking/mnt_listModelOutlet_ora',authenticate, async (req, res) => {
     try {
 
         const { month, year, outletcode } = req.query;
