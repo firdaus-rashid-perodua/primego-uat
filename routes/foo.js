@@ -533,10 +533,8 @@ select  a.chassis_no ,a.sales_center_code,b.fmr_id,a.jpj_status
 from vsales.sndsv_jpj_transactions a, dna.sndsd_vehicles b
 where a.jpj_status = 'ACK'
 and a.chassis_no = b.chassis_number
---and a.creation_date >= trunc(sysdate)
---and a.creation_date < trunc(sysdate) + 1
-and a.creation_date >= '28-may-2026'
-and a.creation_date < '29-may-2026'
+and a.creation_date >= trunc(sysdate)
+and a.creation_date < trunc(sysdate) + 1
 --and a.sales_center_code = ''
 and a.indicator = '0'
             `,
@@ -577,10 +575,8 @@ select  'ACK' as status, outl.region, outl.region_2, count(*) as total_ack
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, bma_outlet_type outl, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
---and a.creation_date >= trunc(sysdate)
---and a.creation_date < trunc(sysdate) + 1
-and jpj.creation_date >= '28-may-2026'
-and jpj.creation_date < '29-may-2026'
+and a.creation_date >= trunc(sysdate)
+and a.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = outl.sls_code
 --and jpj.sales_center_code = :outletcode
@@ -626,10 +622,8 @@ select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PE
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
---and a.creation_date >= trunc(sysdate)
---and a.creation_date < trunc(sysdate) + 1
-and jpj.creation_date >= '28-may-2026'
-and jpj.creation_date < '29-may-2026'
+and a.creation_date >= trunc(sysdate)
+and a.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -678,10 +672,8 @@ select  REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, '
 from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
---and a.creation_date >= trunc(sysdate)
---and a.creation_date < trunc(sysdate) + 1
-and jpj.creation_date >= '28-may-2026'
-and jpj.creation_date < '29-may-2026'
+and a.creation_date >= trunc(sysdate)
+and a.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 --and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -727,10 +719,8 @@ select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PE
 from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
---and a.creation_date >= trunc(sysdate)
---and a.creation_date < trunc(sysdate) + 1
-and jpj.creation_date >= '28-may-2026'
-and jpj.creation_date < '29-may-2026'
+and a.creation_date >= trunc(sysdate)
+and a.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -778,8 +768,8 @@ select  jpj.sales_center_code as outlet_code, count(*) as total_ack
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
-and jpj.creation_date >= '28-may-2026'
-and jpj.creation_date < '29-may-2026'
+and jpj.creation_date >= trunc(sysdate)
+and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 --and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
