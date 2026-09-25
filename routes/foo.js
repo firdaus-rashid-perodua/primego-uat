@@ -399,7 +399,7 @@ router.get('/api/user-access', authenticate, async (req, res) => {
         const result = await conn.execute(`
 select login_id as users, acl_registration, acl_booking, acl_parts, acl_service 
 from bma_users
-where upper(login_id) = upper(:username)
+where login_id = upper(:username)
 and record_status = 'E'
             `,
             {
