@@ -1291,7 +1291,7 @@ WITH TargetSummary AS (
     WHERE Parameter = 'New Car Reg'
       AND Year = @yearParam
       AND Month = @monthParam
-      AND Model <> 'AXIA E'
+      --AND Model <> 'AXIA E'
     GROUP BY Model
 ),
 RegistrationSummary AS (
@@ -1302,7 +1302,8 @@ RegistrationSummary AS (
     FROM (
         SELECT DISTINCT Model 
         FROM [DM_BRONZE].[CRKPI].[FlatFile_Target] 
-        WHERE Parameter = 'New Car Reg' AND Year = 2025 AND Month = 5 AND Model <> 'AXIA E'
+        WHERE Parameter = 'New Car Reg' AND Year = 2025 AND Month = 5 
+        --AND Model <> 'AXIA E'
     ) t
     INNER JOIN [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg] r
         ON r.JPJ_MODEL_DESCRIPTION LIKE '%' + t.Model + '%'
@@ -1511,7 +1512,7 @@ WITH TargetData AS (
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND TR2.[Outlet Code] = @outletCodeParam
-      AND TR2.Model <> 'AXIA E'
+      --AND TR2.Model <> 'AXIA E'
     GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
 ),
 ActualData AS (
@@ -1650,7 +1651,7 @@ WITH TargetData AS (
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND TR2.[Outlet Code] = @outletCodeParam
-      AND TR2.Model <> 'AXIA E'
+      --AND TR2.Model <> 'AXIA E'
     GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
 ),
 ActualData AS (
@@ -2695,7 +2696,7 @@ WITH TargetData AS (
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND TR2.[Outlet Code] = @outletCodeParam
-      AND TR2.Model <> 'AXIA E'
+      --AND TR2.Model <> 'AXIA E'
     GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
 ),
 ActualDataBr AS (
