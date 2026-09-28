@@ -5,11 +5,11 @@ const Joi = require('joi');
 const querySchema = Joi.object({
     page: Joi.number().integer().min(1).default(1),
     limit: Joi.number().integer().min(1).max(100).default(10), // 🟢 Prevents pulling too many rows at once
-    year: Joi.number().integer().required(),
-    month: Joi.number().integer().required(),
-    region: Joi.string().alphanum().max(5).trim().required(),
-    outletcode: Joi.number().integer().required(),
-    username: Joi.string().alphanum().max(5).trim().required(),
+    year: Joi.number().integer(),
+    month: Joi.number().integer(),
+    region: Joi.string().alphanum().max(5).trim(),
+    outletcode: Joi.number().integer(),
+    username: Joi.string().alphanum().max(5).trim(),
 }).unknown(false); // 🔴 Blocks unexpected/unknown query parameters entirely
 
 const validateQueryParams = (req, res, next) => {
