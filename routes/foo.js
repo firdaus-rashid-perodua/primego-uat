@@ -1172,7 +1172,7 @@ router.get('/api/dashboard/mnt_partTarget', authenticate, async (req, res) => {
 
 
 // List actual monthly registration by month
-router.get('/api/registration/mnt_listActual', authenticate, async (req, res) => {
+router.get('/api/registration/mnt_listActual', authenticate, validateQueryParams, async (req, res) => {
     try {
         const { month, year } = req.query;
 
