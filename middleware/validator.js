@@ -4,7 +4,9 @@ const Joi = require('joi');
 // Define rules for GET requests running pagination or limits
 const querySchema = Joi.object({
     page: Joi.number().integer().min(1).default(1),
-    limit: Joi.number().integer().min(1).max(100).default(10) // 🟢 Prevents pulling too many rows at once
+    limit: Joi.number().integer().min(1).max(100).default(10), // 🟢 Prevents pulling too many rows at once
+    year: Joi.number().integer().required(),
+    month: Joi.number().integer().required(),
 }).unknown(false); // 🔴 Blocks unexpected/unknown query parameters entirely
 
 const validateQueryParams = (req, res, next) => {
