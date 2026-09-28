@@ -17,6 +17,8 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const authenticate = require('../middleware/authenticate');
 
+const { validateQueryParams } = require('../middleware/validator');
+
 
 const algorithm = 'aes-256-gcm';
 const key = Buffer.from(process.env.ENCRYPTION_KEY, 'hex');
@@ -82,7 +84,7 @@ async function logAuditTrail(username, status) {
  *       500:
  *         description: Database connection or query error.
  */
-router.get('/from-mssql', authenticate, async (req, res) => {
+router.get('/from-mssql', authenticate, validateQueryParams, async (req, res) => {
     try {
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT TOP 1 1 as MSSQL
