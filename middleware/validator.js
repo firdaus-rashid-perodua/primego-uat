@@ -7,6 +7,9 @@ const querySchema = Joi.object({
     limit: Joi.number().integer().min(1).max(100).default(10), // 🟢 Prevents pulling too many rows at once
     year: Joi.number().integer().required(),
     month: Joi.number().integer().required(),
+    region: Joi.string().alphanum().max(5).trim().required(),
+    outletcode: Joi.number().integer().required(),
+    username: Joi.string().alphanum().max(5).trim().required(),
 }).unknown(false); // 🔴 Blocks unexpected/unknown query parameters entirely
 
 const validateQueryParams = (req, res, next) => {
