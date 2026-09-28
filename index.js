@@ -52,6 +52,24 @@ app.use(
                 "img-src": ["'self'", "data:"],
                 "frame-ancestors": ["'none'"], // replaces X-Frame-Options, keep frameguard too for older browsers
             }
+        },
+        // This explicitly denies browser access to hardware features across your API
+        permissionsPolicy: {
+            features: {
+                camera: ["'none'"],
+                microphone: ["'none'"],
+                geolocation: ["'none'"],
+                payment: ["'none'"],
+                usb: ["'none'"]
+            }
+        },
+        // Resolves the "Missing Cross-Origin Resource-Policy (CORP) Header" finding
+        crossOriginResourcePolicy: {
+            policy: "same-origin"
+        },
+        // Forces cross-origin documents to be safely credentialed or cross-origin isolated
+        crossOriginEmbedderPolicy: {
+            policy: "require-corp"
         }
     })
 );

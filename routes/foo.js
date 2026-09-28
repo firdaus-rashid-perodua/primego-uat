@@ -1910,8 +1910,8 @@ FROM (
     SELECT 
         (SELECT COUNT(*) 
          FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
-         WHERE BOOKING_STATUS = 'BOOK'
-           AND MONTH(BOOKING_DATE) = @monthParam
+         --WHERE BOOKING_STATUS = 'BOOK'
+           WHERE MONTH(BOOKING_DATE) = @monthParam
            AND YEAR(BOOKING_DATE) = @yearParam) AS [total_bkg_month_br],
            
         (SELECT COUNT(*) 
