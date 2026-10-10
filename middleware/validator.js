@@ -10,6 +10,8 @@ const querySchema = Joi.object({
     region: Joi.string().alphanum().max(5).trim(),
     outletcode: Joi.number().integer(),
     username: Joi.string().alphanum().max(5).trim(),
+    model: Joi.string().alphanum().trim(),
+    fmrid: Joi.string().alphanum().trim(),
 }).unknown(false); // 🔴 Blocks unexpected/unknown query parameters entirely
 
 const validateQueryParams = (req, res, next) => {

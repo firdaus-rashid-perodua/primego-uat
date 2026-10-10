@@ -577,8 +577,8 @@ select  'ACK' as status, outl.region, outl.region_2, count(*) as total_ack
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, bma_outlet_type outl, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
-and a.creation_date >= trunc(sysdate)
-and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= trunc(sysdate)
+and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = outl.sls_code
 --and jpj.sales_center_code = :outletcode
@@ -624,8 +624,8 @@ select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PE
 from vsales.sndsv_jpj_transactions jpj, dna.sndsd_vehicles veh, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
-and a.creation_date >= trunc(sysdate)
-and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= trunc(sysdate)
+and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -674,8 +674,8 @@ select  REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, '
 from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
-and a.creation_date >= trunc(sysdate)
-and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= trunc(sysdate)
+and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 --and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -721,8 +721,8 @@ select  jpj.sales_center_code as outlet_code, REGEXP_REPLACE(d.description, '^PE
 from sndsv_jpj_transactions jpj, sndsd_vehicles veh, sndsd_family_model_colors a, sndsd_vehicle_colors b, sndsd_family_models c, sndsd_vehicle_family_groups d, sndsd_vehicle_families e 
 where jpj.jpj_status = 'ACK'
 and jpj.chassis_no = veh.chassis_number
-and a.creation_date >= trunc(sysdate)
-and a.creation_date < trunc(sysdate) + 1
+and jpj.creation_date >= trunc(sysdate)
+and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
@@ -1361,6 +1361,492 @@ ORDER BY ACTUAL_REG_COUNT DESC;
 
 });
 
+
+// NEW - 2/10/2026
+router.get('/api/registration/month/model/list_actual', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT
+    LEFT(JPJ_MODEL_DESCRIPTION, CHARINDEX(' - ', JPJ_MODEL_DESCRIPTION) - 1) AS MODEL,
+    COUNT(*) AS TOTAL,
+    YEAR(REG_DATE) AS [YEAR],
+    MONTH(REG_DATE) AS [MONTH]
+FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
+WHERE MONTH(REG_DATE) = @monthParam
+  AND YEAR(REG_DATE) = @yearParam
+GROUP BY
+    YEAR(REG_DATE),
+    MONTH(REG_DATE),
+    LEFT(JPJ_MODEL_DESCRIPTION, CHARINDEX(' - ', JPJ_MODEL_DESCRIPTION) - 1)
+ORDER BY TOTAL DESC;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/model/list_actual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+router.get('/api/registration/month/model/list_target', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT
+    CASE
+        WHEN UPPER(MODEL) IN ('AXIA', 'AXIA E') THEN 'AXIA'
+        ELSE MODEL
+    END AS MODEL,
+    CAST(SUM(target) AS INT) AS TARGET
+FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
+WHERE YEAR = @yearParam
+  AND MONTH = @monthParam
+  AND PARAMETER = 'New Car Reg'
+GROUP BY
+    CASE
+        WHEN UPPER(MODEL) IN ('AXIA', 'AXIA E') THEN 'AXIA'
+        ELSE MODEL
+    END;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/model/list_actual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+router.get('/api/registration/month/region/list_actual', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        CASE
+            WHEN OTL2.Region = 'East Coast (Zone 1)' THEN 'East Coast 1'
+            WHEN OTL2.Region = 'East Coast (Zone 2)' THEN 'East Coast 2'
+            ELSE OTL2.Region
+        END AS [REGION_NAME],
+        COUNT(*) AS ACTUAL_REG_COUNT
+    FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.REG_DATE) = @monthParam
+      AND YEAR(AC2.REG_DATE) = @yearParam
+    GROUP BY OTL2.Region_2, OTL2.Region;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/region/list_actual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+router.get('/api/registration/month/region/list_target', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+    SELECT REGION, CAST(SUM(TARGET) AS INT) AS TARGET
+    FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
+    WHERE YEAR = @yearParam
+    AND MONTH = @monthParam
+    AND PARAMETER = 'New Car Reg'
+    GROUP BY REGION
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/region/list_target  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+router.get('/api/registration/month/outlet/model/variant', authenticate, async (req, res) => {
+    try {
+        const { month, year, outletcode, model } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedOutletCode = outletcode || '522105';
+        const parsedModel = model || '';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('outletCodeParam', parseInt(parsedOutletCode)).input('modelParam', parsedModel).query(`
+    SELECT JPJ_MODEL_DESCRIPTION as [MODEL_VARIANT], COUNT(*) as [TOTAL]
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
+    WHERE MONTH(REG_DATE) = @monthParam
+    AND YEAR(REG_DATE) = @yearParam
+    AND JPJ_MODEL_DESCRIPTION LIKE '%' + upper(@modelParam) + '%'
+    AND SALES_CENTER_CODE = @outletCodeParam
+    GROUP BY
+    JPJ_MODEL_DESCRIPTION
+    ORDER BY [TOTAL] DESC;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/outlet/model/variant  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+router.get('/api/registration/month/model/variant', authenticate, async (req, res) => {
+    try {
+        const { month, year, model } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedModel = model || 'ZZZ';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('modelParam', parsedModel).query(`
+    SELECT JPJ_MODEL_DESCRIPTION as [MODEL_VARIANT], COUNT(*) as [TOTAL]
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
+    WHERE MONTH(REG_DATE) = @monthParam
+    AND YEAR(REG_DATE) = @yearParam
+    AND JPJ_MODEL_DESCRIPTION LIKE '%' + upper(@modelParam) + '%'
+    GROUP BY
+    JPJ_MODEL_DESCRIPTION
+    ORDER BY [TOTAL] DESC;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/model/variant  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+router.get('/api/booking/month/model', authenticate, async (req, res) => {
+    try {
+        const { month, year, model, fmrid } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedModel = model || 'ZZZ';
+        const parsedFmrid = fmrid
+            ? fmrid.split(',')
+            : ['XXX'];
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+
+        const request = pool.request()
+            .input('monthParam', parsedMonth)
+            .input('yearParam', parsedYear);
+
+        const placeholders = parsedFmrid.map((id, index) => {
+            request.input(`fmrid${index}`, id);
+            return `@fmrid${index}`;
+        }).join(',');
+
+        const result = await request.query(`
+            SELECT FMR_ID, COUNT(*) AS [TOTAL]
+            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
+            WHERE MONTH(BOOKING_DATE) = @monthParam
+            AND YEAR(BOOKING_DATE) = @yearParam
+            AND FMR_ID IN (${placeholders})
+            GROUP BY FMR_ID
+            ORDER BY [TOTAL] DESC
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+router.get('/api/booking/month/outlet/model', authenticate, async (req, res) => {
+    try {
+        const { month, year, outletcode, model, fmrid } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedModel = model || 'ZZZ';
+        const parsedOutletCode = outletcode || 'ZZZ';
+        const parsedFmrid = fmrid
+            ? fmrid.split(',')
+            : ['XXX'];
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+
+        const request = pool.request()
+            .input('monthParam', parsedMonth)
+            .input('yearParam', parsedYear)
+            .input('outletCodeParam', parsedOutletCode);
+
+        const placeholders = parsedFmrid.map((id, index) => {
+            request.input(`fmrid${index}`, id);
+            return `@fmrid${index}`;
+        }).join(',');
+
+        const result = await request.query(`
+            SELECT FMR_ID, COUNT(*) AS [TOTAL]
+            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
+            WHERE MONTH(BOOKING_DATE) = @monthParam
+            AND YEAR(BOOKING_DATE) = @yearParam
+            AND SALES_CENTER_CODE = @outletCodeParam
+            AND FMR_ID IN (${placeholders})
+            GROUP BY FMR_ID
+            ORDER BY [TOTAL] DESC
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/outlet/model  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+router.get('/api/maintenance/model/fmr_id', authenticate, async (req, res) => {
+    try {
+
+        const { fmrid } = req.query;
+        const parsedFmrid = fmrid
+            ? fmrid.split(',')
+            : ['XXX'];
+
+        // Create :1,:2,:3,:4
+        const placeholders = parsedFmrid
+            .map((_, index) => `:${index + 1}`)
+            .join(',');
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+
+        const sql = `
+    select distinct
+        a.id as fmr_id,
+        a.vml_manufacturing_code as model_code,
+        b.vcl_code,
+        b.description as vcl_description,
+        c.jpj_model_description,
+        d.description,
+        TRIM(REGEXP_REPLACE(d.description, 'PERODUA|\\(NEW\\)', '', 1, 0, 'i')) AS model
+    from dna.sndsd_family_model_colors a,
+         dna.sndsd_vehicle_colors b,
+         dna.sndsd_family_models c,
+         dna.sndsd_vehicle_family_groups d,
+         dna.sndsd_vehicle_families e
+    where a.record_status = 'E'
+      and a.vcl_code = b.vcl_code
+      and a.fml_id = c.id
+      and e.vfp_id = d.id
+      and c.vfy_id = e.id
+      and a.id IN (${placeholders})
+`;
+
+        const result = await conn.execute(
+            sql,
+            parsedFmrid,
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+router.get('/api/maintenance/model/model', authenticate, async (req, res) => {
+    try {
+
+        const { model } = req.query;
+        const parsedModel = model;
+
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+
+        const result = await conn.execute(`
+    select distinct
+        a.id as fmr_id,
+        a.vml_manufacturing_code as model_code,
+        b.vcl_code,
+        b.description as vcl_description,
+        c.jpj_model_description,
+        d.description,
+        TRIM(REGEXP_REPLACE(d.description, 'PERODUA|\\(NEW\\)', '', 1, 0, 'i')) AS model
+    from dna.sndsd_family_model_colors a,
+         dna.sndsd_vehicle_colors b,
+         dna.sndsd_family_models c,
+         dna.sndsd_vehicle_family_groups d,
+         dna.sndsd_vehicle_families e
+    where a.record_status = 'E'
+      and a.vcl_code = b.vcl_code
+      and a.fml_id = c.id
+      and e.vfp_id = d.id
+      and c.vfy_id = e.id
+      and UPPER(d.description) LIKE '%' || UPPER(:model) || '%'
+`,
+            { model: parsedModel },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
 
 
 // List actual monthly registration by month (Outlets)
