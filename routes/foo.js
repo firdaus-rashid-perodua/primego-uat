@@ -581,6 +581,7 @@ and jpj.creation_date >= trunc(sysdate)
 and jpj.creation_date < trunc(sysdate) + 1
 and jpj.indicator = '0'
 and jpj.sales_center_code = outl.sls_code
+and outl.outlet_active = 'Active'
 --and jpj.sales_center_code = :outletcode
 AND veh.fmr_id = a.id
 AND a.vcl_code = b.vcl_code
@@ -946,7 +947,9 @@ router.get('/api/dashboard/mnt_regActual', authenticate, async (req, res) => {
             .input('yearParam', parseInt(parsedYear)).query(`SELECT COUNT(*) as 'total_reg_month'
     FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
     WHERE MONTH(REG_DATE) = @monthParam
-      AND YEAR(REG_DATE) = @yearParam`);
+      AND YEAR(REG_DATE) = @yearParam
+      AND REG_DATE < CAST(GETDATE() AS DATE)   -- exclude today
+      `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
@@ -1382,6 +1385,7 @@ SELECT
 FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
 WHERE MONTH(REG_DATE) = @monthParam
   AND YEAR(REG_DATE) = @yearParam
+  AND REG_DATE < CAST(GETDATE() AS DATE)   -- exclude today
 GROUP BY
     YEAR(REG_DATE),
     MONTH(REG_DATE),
@@ -1456,6 +1460,53 @@ GROUP BY
 
 
 router.get('/api/registration/month/region/list_actual', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT 
+    OTL2.Region_2 AS [REGION],
+    CASE
+        WHEN OTL2.Region = 'East Coast (Zone 1)' THEN 'East Coast 1'
+        WHEN OTL2.Region = 'East Coast (Zone 2)' THEN 'East Coast 2'
+        ELSE OTL2.Region
+    END AS [REGION_NAME],
+    COUNT(*) AS ACTUAL_REG_COUNT
+FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+    ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+WHERE MONTH(AC2.REG_DATE) = @monthParam
+  AND YEAR(AC2.REG_DATE) = @yearParam
+  AND OTL2.OUTLET_ACTIVE = 'Active'
+  AND AC2.REG_DATE < CAST(GETDATE() AS DATE)   -- exclude today
+GROUP BY OTL2.Region_2, OTL2.Region;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/region/list_actual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+router.get('/api/registration/month/region/list_actual_x', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
 
@@ -1558,6 +1609,7 @@ router.get('/api/registration/month/outlet/model/variant', authenticate, async (
     AND YEAR(REG_DATE) = @yearParam
     AND JPJ_MODEL_DESCRIPTION LIKE '%' + upper(@modelParam) + '%'
     AND SALES_CENTER_CODE = @outletCodeParam
+    AND REG_DATE < CAST(GETDATE() AS DATE)   -- exclude today
     GROUP BY
     JPJ_MODEL_DESCRIPTION
     ORDER BY [TOTAL] DESC;
@@ -1599,6 +1651,7 @@ router.get('/api/registration/month/model/variant', authenticate, async (req, re
     WHERE MONTH(REG_DATE) = @monthParam
     AND YEAR(REG_DATE) = @yearParam
     AND JPJ_MODEL_DESCRIPTION LIKE '%' + upper(@modelParam) + '%'
+    AND REG_DATE < CAST(GETDATE() AS DATE)   -- exclude today
     GROUP BY
     JPJ_MODEL_DESCRIPTION
     ORDER BY [TOTAL] DESC;
@@ -1623,8 +1676,7 @@ router.get('/api/registration/month/model/variant', authenticate, async (req, re
 });
 
 
-
-router.get('/api/booking/month/model', authenticate, async (req, res) => {
+router.get('/api/booking/month/model/list_actual', authenticate, async (req, res) => {
     try {
         const { month, year, model, fmrid } = req.query;
 
@@ -1648,18 +1700,91 @@ router.get('/api/booking/month/model', authenticate, async (req, res) => {
         }).join(',');
 
         const result = await request.query(`
-            SELECT FMR_ID, COUNT(*) AS [TOTAL]
-            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
-            WHERE MONTH(BOOKING_DATE) = @monthParam
-            AND YEAR(BOOKING_DATE) = @yearParam
-            AND FMR_ID IN (${placeholders})
-            GROUP BY FMR_ID
-            ORDER BY [TOTAL] DESC
+WITH CombinedBookings AS (
+    -- Query 1: Branch Bookings
+    SELECT 
+        FMR_ID, 
+        COUNT(*) AS [TOTAL]
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
+    WHERE MONTH(BOOKING_DATE) = @monthParam
+      AND YEAR(BOOKING_DATE) = @yearParam
+    GROUP BY FMR_ID
+
+    UNION ALL
+
+    -- Query 2: Dealer Bookings
+    SELECT 
+        id AS [FMR_ID], 
+        COUNT(*) AS [TOTAL]
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer]
+    WHERE MONTH(ORDERDATETIME) = @monthParam
+      AND YEAR(ORDERDATETIME) = @yearParam
+    GROUP BY id
+)
+SELECT 
+    FMR_ID, 
+    SUM([TOTAL]) AS [TOTAL]
+FROM CombinedBookings
+GROUP BY FMR_ID
+ORDER BY [TOTAL] DESC;
 `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model  Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model/all  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+router.get('/api/booking/month/model/list_target', authenticate, async (req, res) => {
+    try {
+        const { month, year, model, fmrid } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedModel = model || 'ZZZ';
+        const parsedFmrid = fmrid
+            ? fmrid.split(',')
+            : ['XXX'];
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+
+        const request = pool.request()
+            .input('monthParam', parsedMonth)
+            .input('yearParam', parsedYear);
+
+        const placeholders = parsedFmrid.map((id, index) => {
+            request.input(`fmrid${index}`, id);
+            return `@fmrid${index}`;
+        }).join(',');
+
+        const result = await request.query(`
+SELECT CASE WHEN MODEL = 'AXIA E' THEN 'AXIA' ELSE MODEL END AS MODEL, 
+	   FLOOR(SUM(TARGET)) as TOTAL
+  FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
+  WHERE Parameter = 'Booking'
+  AND Year = @yearParam
+  AND Month = @monthParam
+  GROUP BY CASE WHEN MODEL = 'AXIA E' THEN 'AXIA' ELSE MODEL END
+  ORDER BY TOTAL DESC
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model/all  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -1732,6 +1857,69 @@ router.get('/api/booking/month/outlet/model', authenticate, async (req, res) => 
 });
 
 
+router.get('/api/maintenance/model/all', authenticate, async (req, res) => {
+    try {
+
+        const { fmrid } = req.query;
+        const parsedFmrid = fmrid
+            ? fmrid.split(',')
+            : ['XXX'];
+
+        // Create :1,:2,:3,:4
+        const placeholders = parsedFmrid
+            .map((_, index) => `:${index + 1}`)
+            .join(',');
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+
+        const sql = `
+    select distinct
+        a.id as fmr_id,
+        a.vml_manufacturing_code as model_code,
+        b.vcl_code,
+        b.description as vcl_description,
+        c.jpj_model_description,
+        d.description,
+        TRIM(REGEXP_REPLACE(d.description, 'PERODUA|\\(NEW\\)', '', 1, 0, 'i')) AS model
+    from dna.sndsd_family_model_colors a,
+         dna.sndsd_vehicle_colors b,
+         dna.sndsd_family_models c,
+         dna.sndsd_vehicle_family_groups d,
+         dna.sndsd_vehicle_families e
+    where a.record_status = 'E'
+      and a.vcl_code = b.vcl_code
+      and a.fml_id = c.id
+      and e.vfp_id = d.id
+      and c.vfy_id = e.id
+`;
+
+        const result = await conn.execute(
+            sql,
+            // parsedFmrid,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/maintenance/model/all  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
 router.get('/api/maintenance/model/fmr_id', authenticate, async (req, res) => {
     try {
 
@@ -1780,7 +1968,7 @@ router.get('/api/maintenance/model/fmr_id', authenticate, async (req, res) => {
 
         await conn.close();
         const duration = (performance.now() - startTime).toFixed(2);
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration  Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/maintenance/model/fmr_id  Params: " + JSON.stringify(req.query));
 
         //res.json(result.rows);
         res.status(200).json({
@@ -1990,25 +2178,33 @@ WITH TargetData AS (
     SELECT 
         OTL2.Region_2 AS [REGION],
         TR2.[Outlet Code] AS OUTLET_CODE,
-        TR2.Model AS [MODEL],
+        -- Merge AXIA E into AXIA
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END AS [MODEL],
         SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_REG_COUNT
     FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
         ON TR2.[Outlet Code] = OTL2.SLS_CODE 
     WHERE TR2.Parameter = 'New Car Reg' 
-      AND TR2.Month = @monthParam
+      AND TR2.Month = @monthParam 
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND TR2.[Outlet Code] = @outletCodeParam
-      --AND TR2.Model <> 'AXIA E'
-    GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
+    GROUP BY 
+        OTL2.Region_2, 
+        TR2.[Outlet Code], 
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END
 ),
 ActualData AS (
     SELECT 
         t.[REGION],
         t.OUTLET_CODE,
         t.[MODEL],
-        -- 1. Safely extract SALES_CENTER_NAME matching your criteria
         ISNULL((
             SELECT TOP 1 AC2.SALES_CENTER_NAME
             FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
@@ -2017,7 +2213,6 @@ ActualData AS (
               AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
               AND AC2.SALES_CENTER_NAME IS NOT NULL
         ), 'No Name Registered') AS OUTLET_NAME,
-        -- 2. Safely extract execution count
         (
             SELECT COUNT(*) 
             FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
@@ -2025,7 +2220,6 @@ ActualData AS (
               AND YEAR(AC2.REG_DATE) = @yearParam
               AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
               AND AC2.JPJ_MODEL_DESCRIPTION LIKE '%' + t.[MODEL] + '%'
-              --AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
         ) AS REG_COUNT
     FROM TargetData t
 )
@@ -2036,20 +2230,20 @@ SELECT
     ISNULL(t.[MODEL], a.[MODEL]) AS [MODEL],
     ISNULL(t.TARGET_REG_COUNT, 0) AS TARGET_REG_COUNT,
     ISNULL(a.REG_COUNT, 0) AS ACTUAL_REG_COUNT,
-    
-    -- 1. No Decimal Places (rounded to nearest integer)
+
+    -- No decimal places
     CASE 
         WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0
         ELSE CAST(ROUND((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT, 0) AS INT)
     END AS REG_PCTG,
 
-    -- 2. One Decimal Place
+    -- One decimal place
     CASE 
         WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0.0
         ELSE CAST((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT AS DECIMAL(10,1))
     END AS REG_PCTG_1,
 
-    -- 3. Two Decimal Places
+    -- Two decimal places
     CASE 
         WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0.00
         ELSE CAST((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT AS DECIMAL(10,2))
@@ -3174,7 +3368,11 @@ WITH TargetData AS (
     SELECT 
         OTL2.Region_2 AS [REGION],
         TR2.[Outlet Code] AS OUTLET_CODE,
-        TR2.Model AS [MODEL],
+        -- Merge AXIA E into AXIA
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END AS [MODEL],
         SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
     FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
@@ -3184,8 +3382,13 @@ WITH TargetData AS (
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND TR2.[Outlet Code] = @outletCodeParam
-      --AND TR2.Model <> 'AXIA E'
-    GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
+    GROUP BY 
+        OTL2.Region_2, 
+        TR2.[Outlet Code], 
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END
 ),
 ActualDataBr AS (
     SELECT 

@@ -5,3 +5,5 @@ package.json
 .env uat
 .env dev
 .env live
+.env bak
+.env dev2
