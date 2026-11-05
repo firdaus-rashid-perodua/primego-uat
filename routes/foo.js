@@ -2,6 +2,7 @@
 http://10.60.22.62/from-oracle
 http://10.60.22.62/from-mssql
 http://10.60.22.62/get-users
+test
 */
 
 // routes/foo.js
