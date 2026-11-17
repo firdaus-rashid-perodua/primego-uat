@@ -1413,7 +1413,8 @@ ORDER BY TOTAL DESC;
 });
 
 
-router.get('/api/registration/month/model/list_target', authenticate, async (req, res) => {
+// TO UPPER ALL MODEL - 17/11/2026
+/* router.get('/api/registration/month/model/list_target', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
 
@@ -1438,6 +1439,53 @@ GROUP BY
     CASE
         WHEN UPPER(MODEL) IN ('AXIA', 'AXIA E') THEN 'AXIA'
         ELSE MODEL
+    END;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/month/model/list_actual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+}); */
+
+
+router.get('/api/registration/month/model/list_target', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT
+    CASE
+        WHEN UPPER(LTRIM(RTRIM(MODEL))) IN ('AXIA', 'AXIA E') THEN 'AXIA'
+        ELSE UPPER(LTRIM(RTRIM(MODEL)))
+    END AS MODEL,
+    CAST(SUM(target) AS INT) AS TARGET
+FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
+WHERE YEAR = @yearParam
+  AND MONTH = @monthParam
+  AND PARAMETER = 'New Car Reg'
+GROUP BY
+    CASE
+        WHEN UPPER(LTRIM(RTRIM(MODEL))) IN ('AXIA', 'AXIA E') THEN 'AXIA'
+        ELSE UPPER(LTRIM(RTRIM(MODEL)))
     END;
 `);
         //res.json(result.recordset);
