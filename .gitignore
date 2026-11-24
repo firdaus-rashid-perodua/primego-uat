@@ -7,3 +7,4 @@ package.json
 .env live
 .env bak
 .env dev2
+api_url_paths.xlsx

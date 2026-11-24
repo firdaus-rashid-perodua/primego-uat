@@ -7,8 +7,8 @@ test
 
 // routes/foo.js
 const express = require('express');
-const { getMssqlPool } = require('../db/mssql');
-const { getOraclePool } = require('../db/oracle');
+const { getMssqlPool: getRawMssqlPool } = require('../db/mssql');
+const { getOraclePool: getRawOraclePool } = require('../db/oracle');
 const oracledb = require('oracledb');
 const { parse } = require('dotenv');
 const { Client } = require('ldapts');
@@ -19,6 +19,58 @@ const router = express.Router();
 const authenticate = require('../middleware/authenticate');
 
 const { validateQueryParams } = require('../middleware/validator');
+
+const API_TIMEOUT_MS = 30000; // 30 seconds
+
+// Enforce 30-second query timeout on all MSSQL and Oracle calls in this router
+async function getMssqlPool() {
+    const pool = await getRawMssqlPool();
+    return {
+        request: (overrides = {}) => pool.request({ requestTimeout: API_TIMEOUT_MS, ...overrides })
+    };
+}
+
+async function getOraclePool() {
+    const pool = await getRawOraclePool();
+    return {
+        getConnection: async (...args) => {
+            const conn = await pool.getConnection(...args);
+            conn.callTimeout = API_TIMEOUT_MS;
+            return conn;
+        }
+    };
+}
+
+// Enforce 30-second HTTP timeout on all API routes in this router
+router.use((req, res, next) => {
+    let timedOut = false;
+
+    const originalStatus = res.status.bind(res);
+    const originalJson = res.json.bind(res);
+    const originalSend = res.send.bind(res);
+
+    const timer = setTimeout(() => {
+        if (!res.headersSent) {
+            console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: " + req.originalUrl + " Timeout: Request failed to complete in " + API_TIMEOUT_MS + "ms");
+            originalStatus(504);
+            originalJson({
+                success: false,
+                message: `Request timed out after ${API_TIMEOUT_MS / 1000} seconds`
+            });
+        }
+        timedOut = true;
+    }, API_TIMEOUT_MS);
+
+    const clearTimer = () => clearTimeout(timer);
+    res.on('finish', clearTimer);
+    res.on('close', clearTimer);
+
+    res.status = (...args) => (timedOut || res.headersSent ? res : originalStatus(...args));
+    res.json = (...args) => (timedOut || res.headersSent ? res : originalJson(...args));
+    res.send = (...args) => (timedOut || res.headersSent ? res : originalSend(...args));
+
+    next();
+});
 
 
 const algorithm = 'aes-256-gcm';
@@ -75,13 +127,87 @@ async function logAuditTrail(username, status) {
 
 /**
  * @openapi
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ *   schemas:
+ *     DataListResponse:
+ *       type: object
+ *       properties:
+ *         success:
+ *           type: boolean
+ *           example: true
+ *         count:
+ *           type: integer
+ *           example: 1
+ *         data:
+ *           type: array
+ *           items:
+ *             type: object
+ *     ErrorResponse:
+ *       type: object
+ *       properties:
+ *         success:
+ *           type: boolean
+ *           example: false
+ *         message:
+ *           type: string
+ *           example: Database query execution failed
+ *         error:
+ *           type: string
+ *     OracleErrorResponse:
+ *       type: object
+ *       properties:
+ *         error:
+ *           type: string
+ *           example: Oracle query failed
+ * tags:
+ *   - name: System
+ *     description: Database connectivity and server health checks
+ *   - name: Authentication
+ *     description: User authentication and JWT token issuance
+ *   - name: User Access
+ *     description: User ACL permissions
+ *   - name: Dashboard - ACK Registration
+ *     description: Daily JPJ ACK registration dashboard metrics
+ *   - name: Dashboard - Registration
+ *     description: Yearly and monthly registration KPIs
+ *   - name: Dashboard - Booking
+ *     description: Monthly booking KPIs
+ *   - name: Dashboard - Service & Parts
+ *     description: Monthly service and parts KPIs
+ *   - name: Registration
+ *     description: Detailed registration breakdowns by region, outlet, model, and variant
+ *   - name: Booking
+ *     description: Detailed booking breakdowns by region, outlet, and model
+ *   - name: Maintenance
+ *     description: Vehicle model master and FMR reference data
+ */
+
+/**
+ * @openapi
  * /from-mssql:
  *   get:
+ *     tags:
+ *       - System
  *     summary: MSSQL connection test
- *     description: Retrieves data from the MS SQL instance.
+ *     description: Executes a lightweight test query against the MS SQL Server instance.
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Successfully retrieved data.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       400:
+ *         description: Bad Request - Validation failure on query parameters.
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
  *       500:
  *         description: Database connection or query error.
  */
@@ -111,11 +237,21 @@ router.get('/from-mssql', authenticate, validateQueryParams, async (req, res) =>
  * @openapi
  * /from-oracle:
  *   get:
- *     summary: ORACLE connection test
- *     description: Retrieves data from the MS SQL instance.
+ *     tags:
+ *       - System
+ *     summary: Oracle connection test
+ *     description: Executes a lightweight test query against the Oracle database instance.
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Successfully retrieved data.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
  *       500:
  *         description: Database connection or query error.
  */
@@ -149,8 +285,10 @@ router.get('/from-oracle', authenticate, async (req, res) => {
  * @openapi
  * /login-direct:
  *   post:
+ *     tags:
+ *       - Authentication
  *     summary: Active Directory / LDAP Login protocol
- *     description: Authenticates a user against the corporate LDAP directory after verifying registration status in the Oracle database.
+ *     description: Authenticates a user against the corporate LDAP directory after verifying registration status in the Oracle database and returns a JWT token.
  *     requestBody:
  *       required: true
  *       content:
@@ -184,6 +322,18 @@ router.get('/from-oracle', authenticate, async (req, res) => {
  *                 message:
  *                   type: string
  *                   example: Login successful
+ *                 token:
+ *                   type: string
+ *                   description: Signed JWT access token valid for 8 hours.
+ *                 user:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       email:
+ *                         type: string
+ *                       name:
+ *                         type: string
  *       400:
  *         description: Bad Request. Missing parameters.
  *         content:
@@ -198,7 +348,7 @@ router.get('/from-oracle', authenticate, async (req, res) => {
  *                   type: string
  *                   example: Username and password are required
  *       401:
- *         description: Unauthorized. Account is not registered or active.
+ *         description: Unauthorized. Account is not registered, inactive, or LDAP credentials are invalid.
  *         content:
  *           application/json:
  *             schema:
@@ -386,6 +536,36 @@ router.post('/login-direct', async (req, res) => {
 // start BMA (PRIME-GO) query
 
 
+/**
+ * @openapi
+ * /api/user-access:
+ *   get:
+ *     tags:
+ *       - User Access
+ *     summary: Get user module access permissions
+ *     description: Retrieves active ACL permissions (registration, booking, parts, service) for a user from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: username
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Corporate username or email address (domain part is stripped automatically).
+ *         example: firdaus.rashid@perodua.com.my
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved user access rights.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/user-access', authenticate, async (req, res) => {
     try {
 
@@ -432,13 +612,38 @@ and record_status = 'E'
  * @openapi
  * /api/dashboard/ack_registration:
  *   get:
- *     summary: ACK submission
- *     description: Retrieves data from the MS SQL instance.
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration total
+ *     description: Retrieves today's total JPJ EDAFTAR ACK registration count from the Oracle database.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Optional month parameter.
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Optional year parameter.
  *     responses:
  *       200:
- *         description: Successfully retrieved data.
+ *         description: Successfully retrieved ACK registration count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
  *       500:
- *         description: Database connection or query error.
+ *         description: Oracle database connection or query error.
  */
 router.get('/api/dashboard/ack_registration', authenticate, async (req, res) => {
     try {
@@ -480,6 +685,43 @@ WHERE doc_type = 'EDAFTAR'
     }
 });
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_temp:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Temporary ACK registration total
+ *     description: Retrieves configured ACK EDAFTAR count from the Oracle bma_configuration_master table.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Optional month parameter.
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Optional year parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved ACK registration count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_temp', authenticate, async (req, res) => {
     try {
 
@@ -519,6 +761,43 @@ and recordstatus = 'E'
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_outlet_list:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration chassis list
+ *     description: Retrieves today's JPJ ACK transaction records with chassis number, sales center code, FMR ID, and status from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Optional month parameter.
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Optional year parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved ACK transaction list.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_outlet_list', authenticate, async (req, res) => {
     try {
 
@@ -561,6 +840,43 @@ and a.indicator = '0'
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_region:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration count by region
+ *     description: Retrieves today's JPJ ACK registration totals grouped by active outlet region from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Optional month parameter.
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Optional year parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional ACK counts.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_region', authenticate, async (req, res) => {
     try {
 
@@ -610,6 +926,36 @@ group by outl.region, outl.region_2
     }
 });
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_outlet:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration by outlet and model
+ *     description: Retrieves today's JPJ ACK registration counts grouped by vehicle model for a specific outlet code from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '121178'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet ACK counts by model.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_outlet', authenticate, async (req, res) => {
     try {
 
@@ -660,6 +1006,36 @@ GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* 
 
 
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_model:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration by model
+ *     description: Retrieves today's JPJ ACK registration totals grouped by vehicle model across all outlets from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '121178'
+ *         description: Optional outlet code parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved ACK counts by model.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_model', authenticate, async (req, res) => {
     try {
 
@@ -707,6 +1083,36 @@ GROUP BY REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* \\(NEW\\)$', '', 1, 0, 
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_model_outlet:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration by model for an outlet
+ *     description: Retrieves today's JPJ ACK registration totals grouped by model for a specified sales center code from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '121178'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved ACK counts by model for the outlet.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_model_outlet', authenticate, async (req, res) => {
     try {
 
@@ -756,6 +1162,36 @@ GROUP BY jpj.sales_center_code, REGEXP_REPLACE(d.description, '^PERODUA \s*|\s* 
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/ack_registration_list_outlet:
+ *   get:
+ *     tags:
+ *       - Dashboard - ACK Registration
+ *     summary: Today's ACK registration count by outlet
+ *     description: Retrieves today's JPJ ACK registration totals grouped by sales center code from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '121178'
+ *         description: Optional outlet code parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved ACK counts grouped by outlet.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/dashboard/ack_registration_list_outlet', authenticate, async (req, res) => {
     try {
 
@@ -810,11 +1246,29 @@ GROUP BY jpj.sales_center_code
  * @openapi
  * /api/dashboard/year_regActual:
  *   get:
+ *     tags:
+ *       - Dashboard - Registration
  *     summary: Registration - Yearly Actual
- *     description: Retrieves data from the MS SQL instance.
+ *     description: Retrieves the total actual new car registration count for a given year from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
  *     responses:
  *       200:
- *         description: Successfully retrieved data.
+ *         description: Successfully retrieved yearly actual registration count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
  *       500:
  *         description: Database connection or query error.
  */
@@ -850,6 +1304,36 @@ router.get('/api/dashboard/year_regActual', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/year_regTarget_2:
+ *   get:
+ *     tags:
+ *       - Dashboard - Registration
+ *     summary: Registration - Yearly Target (MSSQL)
+ *     description: Retrieves the yearly new car registration target sum from MS SQL FlatFile_Target.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved yearly registration target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/year_regTarget_2', authenticate, async (req, res) => {
 
     const { year } = req.query;
@@ -885,13 +1369,31 @@ router.get('/api/dashboard/year_regTarget_2', authenticate, async (req, res) => 
  * @openapi
  * /api/dashboard/year_regTarget:
  *   get:
+ *     tags:
+ *       - Dashboard - Registration
  *     summary: Registration - Yearly Target
- *     description: Retrieves data from the MS SQL instance.
+ *     description: Retrieves the configured yearly registration target for a given year from Oracle bma_configuration_master.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Target year (YYYY).
  *     responses:
  *       200:
- *         description: Successfully retrieved data.
+ *         description: Successfully retrieved yearly registration target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
  *       500:
- *         description: Database connection or query error.
+ *         description: Oracle database connection or query error.
  */
 router.get('/api/dashboard/year_regTarget', authenticate, async (req, res) => {
     try {
@@ -933,6 +1435,43 @@ and attr1 = :year
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_regActual:
+ *   get:
+ *     tags:
+ *       - Dashboard - Registration
+ *     summary: Registration - Monthly Actual
+ *     description: Retrieves total actual new car registrations for a given month and year (excluding today) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual registration count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_regActual', authenticate, async (req, res) => {
     try {
 
@@ -973,6 +1512,43 @@ router.get('/api/dashboard/mnt_regActual', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_regTarget:
+ *   get:
+ *     tags:
+ *       - Dashboard - Registration
+ *     summary: Registration - Monthly Target
+ *     description: Retrieves total monthly new car registration target for a given month and year from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly registration target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_regTarget', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -1012,6 +1588,28 @@ WHERE YEAR = @yearParam
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_bookActual:
+ *   get:
+ *     tags:
+ *       - Dashboard - Booking
+ *     summary: Booking - Monthly Actual (static snapshot)
+ *     description: Retrieves monthly actual booking count from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual booking count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_bookActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1038,6 +1636,28 @@ router.get('/api/dashboard/mnt_bookActual', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_bookTarget:
+ *   get:
+ *     tags:
+ *       - Dashboard - Booking
+ *     summary: Booking - Monthly Target (static snapshot)
+ *     description: Retrieves monthly booking target from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly booking target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_bookTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1067,6 +1687,28 @@ router.get('/api/dashboard/mnt_bookTarget', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_serviceActual:
+ *   get:
+ *     tags:
+ *       - Dashboard - Service & Parts
+ *     summary: Service - Monthly Actual
+ *     description: Retrieves monthly service actual count from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly service actual count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_serviceActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1093,6 +1735,28 @@ router.get('/api/dashboard/mnt_serviceActual', authenticate, async (req, res) =>
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_serviceTarget:
+ *   get:
+ *     tags:
+ *       - Dashboard - Service & Parts
+ *     summary: Service - Monthly Target
+ *     description: Retrieves monthly service target from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly service target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_serviceTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1121,6 +1785,28 @@ router.get('/api/dashboard/mnt_serviceTarget', authenticate, async (req, res) =>
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_partActual:
+ *   get:
+ *     tags:
+ *       - Dashboard - Service & Parts
+ *     summary: Parts - Monthly Actual
+ *     description: Retrieves monthly parts actual count from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly parts actual count.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_partActual', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1147,6 +1833,28 @@ router.get('/api/dashboard/mnt_partActual', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_partTarget:
+ *   get:
+ *     tags:
+ *       - Dashboard - Service & Parts
+ *     summary: Parts - Monthly Target
+ *     description: Retrieves monthly parts target from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly parts target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_partTarget', authenticate, async (req, res) => {
     try {
         const pool = await getMssqlPool();
@@ -1175,6 +1883,45 @@ router.get('/api/dashboard/mnt_partTarget', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_listActual:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration actual vs target by region
+ *     description: Retrieves monthly actual and target new car registrations grouped by region with achievement percentages from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional registration performance.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       400:
+ *         description: Bad Request - Validation failure on query parameters.
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual monthly registration by month
 router.get('/api/registration/mnt_listActual', authenticate, validateQueryParams, async (req, res) => {
     try {
@@ -1276,6 +2023,43 @@ ORDER BY
 });
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_listActualModel:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration actual vs target by model
+ *     description: Retrieves monthly actual and target new car registrations grouped by vehicle model with achievement percentages from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved model registration performance.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual monthly registration by month (Model)
 router.get('/api/registration/mnt_listActualModel', authenticate, async (req, res) => {
     try {
@@ -1366,6 +2150,43 @@ ORDER BY ACTUAL_REG_COUNT DESC;
 });
 
 
+/**
+ * @openapi
+ * /api/registration/month/model/list_actual:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly actual registrations by model
+ *     description: Retrieves monthly actual registration counts grouped by model prefix (excluding today) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual registrations by model.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // NEW - 2/10/2026
 router.get('/api/registration/month/model/list_actual', authenticate, async (req, res) => {
     try {
@@ -1461,6 +2282,43 @@ GROUP BY
 }); */
 
 
+/**
+ * @openapi
+ * /api/registration/month/model/list_target:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration target by model
+ *     description: Retrieves monthly new car registration target totals grouped by uppercased model name (merging AXIA E into AXIA) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly registration targets by model.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/model/list_target', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -1508,6 +2366,43 @@ GROUP BY
 });
 
 
+/**
+ * @openapi
+ * /api/registration/month/region/list_actual:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly actual registrations by region
+ *     description: Retrieves monthly actual registration counts grouped by active region (excluding today) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual registrations by region.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/region/list_actual', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -1555,6 +2450,43 @@ GROUP BY OTL2.Region_2, OTL2.Region;
 
 });
 
+/**
+ * @openapi
+ * /api/registration/month/region/list_actual_x:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly actual registrations by region (unfiltered)
+ *     description: Retrieves monthly actual registration counts grouped by region without active-outlet or today exclusion filters from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual registrations by region.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/region/list_actual_x', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -1600,6 +2532,43 @@ router.get('/api/registration/month/region/list_actual_x', authenticate, async (
 
 });
 
+/**
+ * @openapi
+ * /api/registration/month/region/list_target:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration target by region
+ *     description: Retrieves monthly new car registration target totals grouped by region from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly registration targets by region.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/region/list_target', authenticate, async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -1639,6 +2608,57 @@ router.get('/api/registration/month/region/list_target', authenticate, async (re
 
 
 
+/**
+ * @openapi
+ * /api/registration/month/outlet/model/variant:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registrations by model variant for an outlet
+ *     description: Retrieves monthly actual registration counts grouped by JPJ model variant for a specific outlet and model (excluding today) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 522105
+ *         description: Sales center / outlet code.
+ *       - in: query
+ *         name: model
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: ''
+ *         description: Model name substring filter (case-insensitive).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved model variant counts for the outlet.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/outlet/model/variant', authenticate, async (req, res) => {
     try {
         const { month, year, outletcode, model } = req.query;
@@ -1683,6 +2703,50 @@ router.get('/api/registration/month/outlet/model/variant', authenticate, async (
 });
 
 
+/**
+ * @openapi
+ * /api/registration/month/model/variant:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registrations by model variant
+ *     description: Retrieves monthly actual registration counts grouped by JPJ model variant matching a model name (excluding today) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: model
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: ZZZ
+ *         description: Model name substring filter (case-insensitive).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved model variant counts.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/registration/month/model/variant', authenticate, async (req, res) => {
     try {
         const { month, year, model } = req.query;
@@ -1725,12 +2789,61 @@ router.get('/api/registration/month/model/variant', authenticate, async (req, re
 });
 
 
+/**
+ * @openapi
+ * /api/booking/month/model/list_actual:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly actual bookings by FMR ID
+ *     description: Retrieves combined monthly branch and dealer actual booking counts grouped by FMR_ID from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: model
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional model parameter.
+ *       - in: query
+ *         name: fmrid
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional comma-separated list of FMR IDs.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual bookings by FMR ID.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/booking/month/model/list_actual', authenticate, async (req, res) => {
     try {
         const { month, year, model, fmrid } = req.query;
 
-        const parsedMonth = parseInt(month, 10) || '05';
-        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedMonth = parseInt(month, 10) || 5;
+        const parsedYear = parseInt(year, 10) || 2025;
         const parsedModel = model || 'ZZZ';
         const parsedFmrid = fmrid
             ? fmrid.split(',')
@@ -1749,38 +2862,19 @@ router.get('/api/booking/month/model/list_actual', authenticate, async (req, res
         }).join(',');
 
         const result = await request.query(`
-WITH CombinedBookings AS (
-    -- Query 1: Branch Bookings
-    SELECT 
-        FMR_ID, 
-        COUNT(*) AS [TOTAL]
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
-    WHERE MONTH(BOOKING_DATE) = @monthParam
-      AND YEAR(BOOKING_DATE) = @yearParam
-    GROUP BY FMR_ID
-
-    UNION ALL
-
-    -- Query 2: Dealer Bookings
-    SELECT 
-        id AS [FMR_ID], 
-        COUNT(*) AS [TOTAL]
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer]
-    WHERE MONTH(ORDERDATETIME) = @monthParam
-      AND YEAR(ORDERDATETIME) = @yearParam
-    GROUP BY id
-)
 SELECT 
     FMR_ID, 
-    SUM([TOTAL]) AS [TOTAL]
-FROM CombinedBookings
+    COUNT(*) AS [TOTAL]
+FROM [DM_SILVER].[CRKPI].[Booking]
+WHERE MONTH(BOOKING_DATE) = @monthParam
+  AND YEAR(BOOKING_DATE) = @yearParam
 GROUP BY FMR_ID
 ORDER BY [TOTAL] DESC;
 `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model/all  Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month/model/list_actual  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -1797,6 +2891,55 @@ ORDER BY [TOTAL] DESC;
 });
 
 
+/**
+ * @openapi
+ * /api/booking/month/model/list_target:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking target by model
+ *     description: Retrieves monthly booking target totals grouped by model (merging AXIA E into AXIA) from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: model
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional model parameter.
+ *       - in: query
+ *         name: fmrid
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional comma-separated list of FMR IDs.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly booking targets by model.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/booking/month/model/list_target', authenticate, async (req, res) => {
     try {
         const { month, year, model, fmrid } = req.query;
@@ -1851,12 +2994,69 @@ SELECT CASE WHEN MODEL = 'AXIA E' THEN 'AXIA' ELSE MODEL END AS MODEL,
 
 
 
+/**
+ * @openapi
+ * /api/booking/month/outlet/model:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly branch bookings by outlet and FMR IDs
+ *     description: Retrieves monthly branch booking counts grouped by FMR_ID for a specific outlet code and comma-separated FMR IDs from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: ZZZ
+ *         description: Sales center / outlet code.
+ *       - in: query
+ *         name: model
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional model parameter.
+ *       - in: query
+ *         name: fmrid
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: XXX
+ *         description: Comma-separated list of FMR IDs to filter by.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet booking counts by FMR ID.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/booking/month/outlet/model', authenticate, async (req, res) => {
     try {
         const { month, year, outletcode, model, fmrid } = req.query;
 
-        const parsedMonth = parseInt(month, 10) || '05';
-        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedMonth = parseInt(month, 10) || 5;
+        const parsedYear = parseInt(year, 10) || 2025;
         const parsedModel = model || 'ZZZ';
         const parsedOutletCode = outletcode || 'ZZZ';
         const parsedFmrid = fmrid
@@ -1878,7 +3078,7 @@ router.get('/api/booking/month/outlet/model', authenticate, async (req, res) => 
 
         const result = await request.query(`
             SELECT FMR_ID, COUNT(*) AS [TOTAL]
-            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
+            FROM [DM_SILVER].[CRKPI].[Booking]
             WHERE MONTH(BOOKING_DATE) = @monthParam
             AND YEAR(BOOKING_DATE) = @yearParam
             AND SALES_CENTER_CODE = @outletCodeParam
@@ -1906,6 +3106,35 @@ router.get('/api/booking/month/outlet/model', authenticate, async (req, res) => 
 });
 
 
+/**
+ * @openapi
+ * /api/maintenance/model/all:
+ *   get:
+ *     tags:
+ *       - Maintenance
+ *     summary: List all active vehicle models
+ *     description: Retrieves all active vehicle family model, color, and FMR ID mappings from the Oracle database.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: fmrid
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Optional comma-separated FMR IDs parameter.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved vehicle model master data.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/maintenance/model/all', authenticate, async (req, res) => {
     try {
 
@@ -1969,6 +3198,36 @@ router.get('/api/maintenance/model/all', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/maintenance/model/fmr_id:
+ *   get:
+ *     tags:
+ *       - Maintenance
+ *     summary: Get vehicle models by FMR IDs
+ *     description: Retrieves active vehicle model, color, and JPJ description details filtered by one or more comma-separated FMR IDs from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: fmrid
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: XXX
+ *         description: Comma-separated list of FMR IDs.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved matching vehicle model records.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/maintenance/model/fmr_id', authenticate, async (req, res) => {
     try {
 
@@ -2032,6 +3291,36 @@ router.get('/api/maintenance/model/fmr_id', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/maintenance/model/model:
+ *   get:
+ *     tags:
+ *       - Maintenance
+ *     summary: Search vehicle models by model name
+ *     description: Retrieves active vehicle model, color, and FMR ID details matching a model description substring from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: model
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Model name substring to search (case-insensitive).
+ *         example: MYVI
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved matching vehicle models.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/maintenance/model/model', authenticate, async (req, res) => {
     try {
 
@@ -2086,6 +3375,50 @@ router.get('/api/maintenance/model/model', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_listRegionOutlet:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration actual vs target by outlet in a region
+ *     description: Retrieves monthly actual and target new car registrations with achievement percentages for active outlets within a specified region from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code (e.g. C1, C2, EC1, EC2, EM, N, S, FMD).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet registration performance for the region.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual monthly registration by month (Outlets)
 router.get('/api/registration/mnt_listRegionOutlet', authenticate, async (req, res) => {
     try {
@@ -2207,6 +3540,57 @@ ORDER BY REG_PCTG_2 DESC;
 
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_listModelOutlet:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly registration actual vs target by model for an outlet
+ *     description: Retrieves monthly actual and target new car registrations grouped by model (merging AXIA E into AXIA) with percentages for a specific outlet from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code.
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '522105'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved model registration performance for the outlet.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual monthly registration by month (Outlets)
 router.get('/api/registration/mnt_listModelOutlet', authenticate, async (req, res) => {
     try {
@@ -2349,6 +3733,57 @@ ORDER BY REG_PCTG_2 DESC;
 
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_outletModelResult:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly outlet model registration summary
+ *     description: Retrieves summary metrics (total models, models below 50% achievement, average percentage, and lowest-performing model) for a specific outlet from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code.
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '522105'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet model summary metrics.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual model monthly registration by month bu outlet
 router.get('/api/registration/mnt_outletModelResult', authenticate, async (req, res) => {
     try {
@@ -2475,6 +3910,50 @@ FROM SummaryData s;
 });
 
 
+/**
+ * @openapi
+ * /api/registration/mnt_RegionOutletSummary:
+ *   get:
+ *     tags:
+ *       - Registration
+ *     summary: Monthly regional outlet registration summary
+ *     description: Retrieves summary statistics (total outlets, count below threshold, average achievement percentage, and highest-performing outlet) for a region from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code (e.g. C1, C2, EC1, EC2, EM, N, S, FMD).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional outlet summary.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 // List actual monthly registration by month (Outlets)
 router.get('/api/registration/mnt_RegionOutletSummary', authenticate, async (req, res) => {
     try {
@@ -2585,6 +4064,28 @@ WHERE RowNum = 1;
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/server_test:
+ *   get:
+ *     tags:
+ *       - System
+ *     summary: Dashboard server connectivity test
+ *     description: Executes a sample 2025 new car registration count query against MS SQL Server to verify server and database availability.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved test query result.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/server_test', authenticate, async (req, res) => {
     try {
         const startTime = performance.now();
@@ -2616,6 +4117,43 @@ router.get('/api/dashboard/server_test', authenticate, async (req, res) => {
 
 // Booking
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_bkgActual:
+ *   get:
+ *     tags:
+ *       - Dashboard - Booking
+ *     summary: Booking - Monthly Actual (Branch & Dealer)
+ *     description: Retrieves monthly actual booking counts split by branch, dealer, and combined total from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly actual booking totals.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_bkgActual', authenticate, async (req, res) => {
     try {
 
@@ -2633,23 +4171,10 @@ router.get('/api/dashboard/mnt_bkgActual', authenticate, async (req, res) => {
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`
-SELECT 
-    total_bkg_month_br,
-    total_bkg_month_dlr,
-    (total_bkg_month_br + total_bkg_month_dlr) AS total_bkg_month
-FROM (
-    SELECT 
-        (SELECT COUNT(*) 
-         FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
-         --WHERE BOOKING_STATUS = 'BOOK'
-           WHERE MONTH(BOOKING_DATE) = @monthParam
-           AND YEAR(BOOKING_DATE) = @yearParam) AS [total_bkg_month_br],
-           
-        (SELECT COUNT(*) 
-         FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer]
-         WHERE MONTH(BOOKINGDATE) = @monthParam
-           AND YEAR(BOOKINGDATE) = @yearParam) AS [total_bkg_month_dlr]
-) AS [SourceData];
+SELECT COUNT(*) AS total_bkg_month
+FROM [DM_SILVER].[CRKPI].[Booking]
+WHERE MONTH(BOOKING_DATE) = @monthParam
+  AND YEAR(BOOKING_DATE) = @yearParam;
 `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2)
@@ -2674,6 +4199,43 @@ FROM (
 
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_bkgTarget2:
+ *   get:
+ *     tags:
+ *       - Dashboard - Booking
+ *     summary: Booking - Monthly Target (Oracle)
+ *     description: Retrieves the configured monthly booking target for a given month and year from Oracle bma_configuration_master.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Two-digit month string (e.g. 05).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly booking target from Oracle.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 //booking target
 router.get('/api/dashboard/mnt_bkgTarget2', authenticate, async (req, res) => {
     try {
@@ -2718,6 +4280,43 @@ router.get('/api/dashboard/mnt_bkgTarget2', authenticate, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/dashboard/mnt_bkgTarget:
+ *   get:
+ *     tags:
+ *       - Dashboard - Booking
+ *     summary: Booking - Monthly Target
+ *     description: Retrieves total monthly booking target for a given month and year from MS SQL FlatFile_Target.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly booking target.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/dashboard/mnt_bkgTarget', authenticate, async (req, res) => {
     try {
 
@@ -2764,6 +4363,43 @@ WHERE YEAR = @yearParam
 });
 
 
+/**
+ * @openapi
+ * /api/booking/mnt_ListActual:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking actual vs target by region
+ *     description: Retrieves monthly actual (branch, dealer, and combined) and target bookings grouped by region with achievement percentages from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional booking performance.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 //booking List
 router.get('/api/booking/mnt_ListActual', authenticate, async (req, res) => {
     try {
@@ -2794,31 +4430,22 @@ WITH TargetData AS (
       AND TR2.Year = @yearParam
     GROUP BY OTL2.Region_2
 ),
-ActualDataBr AS (
-    SELECT OTL2.Region_2 AS [REGION],
-           COUNT(*) AS ACTUAL_BKG_COUNT_BR
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
+ActualData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        COUNT(*) AS ACTUAL_BKG_COUNT
+    FROM [DM_SILVER].[CRKPI].[Booking] AC2
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
         ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
     WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
       AND YEAR(AC2.BOOKING_DATE) = @yearParam
     GROUP BY OTL2.Region_2
-),
-ActualDataDlr AS (
-    SELECT OTL2.Region_2 AS [REGION],
-           COUNT(*) AS ACTUAL_BKG_COUNT_DLR
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
-    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
-        ON AC2.COMPCODE = OTL2.SLS_CODE 
-    WHERE MONTH(AC2.BOOKINGDATE) = @monthParam
-      AND YEAR(AC2.BOOKINGDATE) = @yearParam
-    GROUP BY OTL2.Region_2
 )
 SELECT 
-    -- Resolves region across all three tables
-    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
+    -- Resolves region across targets and actuals
+    COALESCE(t.[REGION], a.[REGION]) AS [REGION],
     
-    CASE COALESCE(t.[REGION], br.[REGION], dlr.[REGION])
+    CASE COALESCE(t.[REGION], a.[REGION])
         WHEN 'C1'  THEN 'Central 1'
         WHEN 'C2'  THEN 'Central 2'
         WHEN 'EC1' THEN 'East Coast 1'
@@ -2827,56 +4454,50 @@ SELECT
         WHEN 'N'   THEN 'Northern'
         WHEN 'S'   THEN 'Southern'
         WHEN 'FMD' THEN 'FMD'
-        ELSE COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) 
+        ELSE COALESCE(t.[REGION], a.[REGION]) 
     END AS REGION_NAME,
 
     ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
-    ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) AS ACTUAL_BKG_COUNT_BR,
-    ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0) AS ACTUAL_BKG_COUNT_DLR,
+    ISNULL(a.ACTUAL_BKG_COUNT, 0) AS ACTUAL_BKG_COUNT,
     
-    -- Combined Total Actuals (Branch + Dealer)
-    (ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) AS ACTUAL_BKG_COUNT,
-    
-    -- 1. No Decimal Places (rounded using combined actuals)
+    -- 1. No Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
-        ELSE CAST(ROUND(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+        ELSE CAST(ROUND((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
     END AS BKG_PCTG,
 
     -- 2. One Decimal Place
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
-        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
     END AS BKG_PCTG_1,
 
     -- 3. Two Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
-        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
     END AS BKG_PCTG_2
 
 FROM TargetData t
-FULL OUTER JOIN ActualDataBr br 
-    ON t.[REGION] = br.[REGION]
-FULL OUTER JOIN ActualDataDlr dlr 
-    ON COALESCE(t.[REGION], br.[REGION]) = dlr.[REGION]
+FULL OUTER JOIN ActualData a 
+    ON t.[REGION] = a.[REGION]
 
 ORDER BY 
-    CASE WHEN COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) = 'FMD' THEN 1 ELSE 0 END ASC, 
-    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) ASC;
+    CASE WHEN COALESCE(t.[REGION], a.[REGION]) = 'FMD' THEN 1 ELSE 0 END ASC, 
+    COALESCE(t.[REGION], a.[REGION]) ASC;
 `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2)
 
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_bkgActual  Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_ListActual  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
             data: result.recordset
         });
     } catch (err) {
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/dashboard/mnt_bkgActual " + err.message);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/booking/mnt_ListActual " + err.message);
         res.status(500).json({
             success: false,
             message: 'Database query execution failed',
@@ -2886,6 +4507,43 @@ ORDER BY
 
 });
 
+/**
+ * @openapi
+ * /api/booking/mnt_ListActualx:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking actual vs target by region (cross-platform)
+ *     description: Combines regional booking targets from Oracle with actual branch and dealer bookings from MS SQL Server and calculates achievement percentages.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Month string (e.g. 05).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved cross-platform regional booking performance.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Cross-platform database query error.
+ */
 router.get('/api/booking/mnt_ListActualx', authenticate, async (req, res) => {
     let oracleConn;
     try {
@@ -2928,22 +4586,9 @@ router.get('/api/booking/mnt_ListActualx', authenticate, async (req, res) => {
             .input('monthParam', intMonth)
             .input('yearParam', intYear)
             .query(`
-WITH CombinedBookings AS (
-    SELECT TR2.compcode AS center_code, OTL2.REGION_2
-    FROM DM_BRONZE.crkpi.[CRMDB_Booking_Dealer] TR2 
-    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON TR2.compcode = OTL2.SLS_CODE 
-    WHERE MONTH(TR2.BOOKINGDATE) = @monthParam AND YEAR(TR2.BOOKINGDATE) = @yearParam
-
-    UNION ALL 
-
-    SELECT ACT1.sales_center_code AS center_code, OTL2.REGION_2
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] ACT1
-    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON ACT1.sales_center_code = OTL2.SLS_CODE 
-    WHERE ACT1.BOOKING_STATUS = 'BOOK' AND MONTH(ACT1.BOOKING_DATE) = @monthParam AND YEAR(ACT1.BOOKING_DATE) = @yearParam
-)
 SELECT 
-    REGION_2 as 'REGION',
-    CASE REGION_2
+    OTL2.REGION_2 AS [REGION],
+    CASE OTL2.REGION_2
         WHEN 'C1'  THEN 'Central 1'
         WHEN 'C2'  THEN 'Central 2'
         WHEN 'EC1' THEN 'East Coast 1'
@@ -2952,13 +4597,17 @@ SELECT
         WHEN 'N'   THEN 'Northern'
         WHEN 'S'   THEN 'Southern'
         WHEN 'FMD' THEN 'FMD' 
-        ELSE REGION_2
+        ELSE OTL2.REGION_2
     END AS REGION_NAME,
-    COUNT(center_code) AS 'ACTUAL_BKG_COUNT'
-FROM CombinedBookings
-GROUP BY REGION_2
+    COUNT(*) AS ACTUAL_BKG_COUNT
+FROM [DM_SILVER].[CRKPI].[Booking] AC2
+JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+    ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
+  AND YEAR(AC2.BOOKING_DATE) = @yearParam
+GROUP BY OTL2.REGION_2
 ORDER BY 
-    CASE WHEN REGION_2 = 'FMD' THEN 1 ELSE 0 END ASC, REGION_2 ASC;
+    CASE WHEN OTL2.REGION_2 = 'FMD' THEN 1 ELSE 0 END ASC, OTL2.REGION_2 ASC;
 `);
 
         // ==========================================
@@ -3013,6 +4662,43 @@ ORDER BY
 });
 
 
+/**
+ * @openapi
+ * /api/booking/mnt_ListActual_temp:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Temporary regional dealer booking count (Oracle)
+ *     description: Retrieves temporary dealer booking counts grouped by region from Oracle ordermaster.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Month string (e.g. 05).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional booking counts.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/booking/mnt_ListActual_temp', authenticate, async (req, res) => {
     try {
 
@@ -3088,6 +4774,43 @@ GROUP BY
 });
 
 
+/**
+ * @openapi
+ * /api/booking/mnt_ListActual_ora:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly actual bookings by region (Oracle)
+ *     description: Retrieves monthly actual branch and dealer bookings grouped by region directly from Oracle.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '05'
+ *         description: Month number or two-digit string (e.g. 05).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '2025'
+ *         description: Target year (YYYY).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved monthly regional bookings from Oracle.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Oracle database query error.
+ */
 router.get('/api/booking/mnt_ListActual_ora', authenticate, async (req, res) => {
     try {
 
@@ -3200,6 +4923,50 @@ ORDER BY region
 });
 
 
+/**
+ * @openapi
+ * /api/booking/mnt_listRegionOutlet:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking actual vs target by outlet in a region
+ *     description: Retrieves monthly actual (branch, dealer, and combined) and target bookings with achievement percentages for outlets within a region from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code (e.g. C1, C2, EC1, EC2, EM, N, S, FMD).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet booking performance for the region.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/booking/mnt_listRegionOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region } = req.query;
@@ -3218,75 +4985,59 @@ WITH TargetData AS (
     SELECT 
         OTL2.Region_2 AS [REGION],
         TR2.[Outlet Code] AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
         SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
     FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
         ON TR2.[Outlet Code] = OTL2.SLS_CODE 
-    WHERE TR2.Parameter = 'New Car Reg' 
+    WHERE TR2.Parameter = 'Booking' 
       AND TR2.Month = @monthParam
       AND TR2.Year = @yearParam
       AND OTL2.OUTLET_ACTIVE = 'Active'
       AND OTL2.REGION_2 = @regionParam
-    GROUP BY OTL2.Region_2, TR2.[Outlet Code]
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code], OTL2.SLS_COMP_NAME
 ),
-ActualDataBr AS (
-    SELECT OTL2.Region_2 AS [REGION],
-           OTL2.SLS_CODE AS OUTLET_CODE,
-           OTL2.SLS_COMP_NAME AS OUTLET_NAME,
-           COUNT(*) AS ACTUAL_BKG_COUNT_BR
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
+ActualData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        OTL2.SLS_CODE AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        COUNT(*) AS ACTUAL_BKG_COUNT
+    FROM [DM_SILVER].[CRKPI].[Booking] AC2
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
         ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
     WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
       AND YEAR(AC2.BOOKING_DATE) = @yearParam
       AND OTL2.REGION_2 = @regionParam
     GROUP BY OTL2.Region_2, OTL2.SLS_CODE, OTL2.SLS_COMP_NAME
-),
-ActualDataDlr AS (
-    SELECT OTL2.Region_2 AS [REGION],
-           OTL2.SLS_CODE AS OUTLET_CODE,
-           OTL2.SLS_COMP_NAME AS OUTLET_NAME,
-           COUNT(*) AS ACTUAL_BKG_COUNT_DLR
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
-    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
-        ON AC2.COMPCODE = OTL2.SLS_CODE 
-    WHERE MONTH(AC2.BOOKINGDATE) = @monthParam
-      AND YEAR(AC2.BOOKINGDATE) = @yearParam
-      AND OTL2.REGION_2 = @regionParam
-    GROUP BY OTL2.Region_2, OTL2.SLS_CODE, OTL2.SLS_COMP_NAME
 )
 SELECT 
     -- Resolves region and outlet attributes safely across targets and actuals
-    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
-    COALESCE(t.OUTLET_CODE, br.OUTLET_CODE, dlr.OUTLET_CODE) AS OUTLET_CODE,
-    COALESCE(br.OUTLET_NAME, dlr.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+    COALESCE(t.[REGION], a.[REGION]) AS [REGION],
+    COALESCE(t.OUTLET_CODE, a.OUTLET_CODE) AS OUTLET_CODE,
+    COALESCE(a.OUTLET_NAME, t.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
     
     ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
-    ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) AS ACTUAL_BKG_COUNT_BR,
-    ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0) AS ACTUAL_BKG_COUNT_DLR,
+    ISNULL(a.ACTUAL_BKG_COUNT, 0) AS ACTUAL_BKG_COUNT,
 
-    -- Combined sum of branch and dealer bookings
-    (ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) AS ACTUAL_BKG_COUNT,
-    -- 1. No Decimal Places (rounded using combined total)
+    -- 1. No Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
-        ELSE CAST(ROUND(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+        ELSE CAST(ROUND((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
     END AS BKG_PCTG,
     -- 2. One Decimal Place
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
-        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
     END AS BKG_PCTG_1,
     -- 3. Two Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
-        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
     END AS BKG_PCTG_2
 FROM TargetData t
-FULL OUTER JOIN ActualDataBr br 
-    ON t.OUTLET_CODE = br.OUTLET_CODE
-FULL OUTER JOIN ActualDataDlr dlr 
-    ON COALESCE(t.OUTLET_CODE, br.OUTLET_CODE) = dlr.OUTLET_CODE
+FULL OUTER JOIN ActualData a 
+    ON t.OUTLET_CODE = a.OUTLET_CODE
 ORDER BY BKG_PCTG_2 DESC;
 `);
         //res.json(result.recordset);
@@ -3398,6 +5149,57 @@ ORDER BY ACTUAL_BKG_COUNT DESC
 });
 */
 
+/**
+ * @openapi
+ * /api/booking/mnt_listModelOutlet:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking actual vs target by model for an outlet
+ *     description: Retrieves monthly actual (branch, dealer, and combined) and target bookings grouped by vehicle model for a specific outlet from MS SQL Server.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code.
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '522105'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved model booking performance for the outlet.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
 router.get('/api/booking/mnt_listModelOutlet', authenticate, async (req, res) => {
     try {
         const { month, year, region, outletcode } = req.query;
@@ -3417,6 +5219,7 @@ WITH TargetData AS (
     SELECT 
         OTL2.Region_2 AS [REGION],
         TR2.[Outlet Code] AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
         -- Merge AXIA E into AXIA
         CASE 
             WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
@@ -3434,172 +5237,80 @@ WITH TargetData AS (
     GROUP BY 
         OTL2.Region_2, 
         TR2.[Outlet Code], 
+        OTL2.SLS_COMP_NAME,
         CASE 
             WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
             ELSE LTRIM(RTRIM(TR2.Model))
         END
 ),
-ActualDataBr AS (
+ActualData AS (
     SELECT 
-        t.[REGION],
-        t.OUTLET_CODE,
-        t.[MODEL],
-        ISNULL((
-            SELECT TOP 1 OTL2.SLS_COMP_NAME
-            FROM DM_GOLD.crkpi.OUTLET_TYPE OTL2
-            WHERE OTL2.SLS_CODE = t.OUTLET_CODE
-        ), 'No Name Registered') AS OUTLET_NAME,
-        (
-            SELECT COUNT(*) 
-            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
-            JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE
-            WHERE MONTH(AC2.BOOKING_DATE) = TRY_CAST(@monthParam AS INT)
-              AND YEAR(AC2.BOOKING_DATE) = TRY_CAST(@yearParam AS INT)
-              AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
-              -- Modify or remove model matching rule below if your branch table uses a different column
-            AND AC2.VML_MANUFACTURING_CODE IN (
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD3GZ'
-                      WHEN 'ALZA' THEN 'BP5HZ'
-                      WHEN 'AXIA' THEN 'CG1XZ'
-                      WHEN 'BEZZA' THEN 'AQ1GZ2'
-                      WHEN 'ARUZ' THEN 'W5XZ2'
-                      WHEN 'ATIVA' THEN 'U1XZ'
-                      WHEN 'TRAZ' THEN 'Y5XZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD3GZ1'
-                      WHEN 'ALZA' THEN 'BP5VZ'
-                      WHEN 'AXIA' THEN 'CG1SZ'
-                      WHEN 'BEZZA' THEN 'AQ1GX2'
-                      WHEN 'ARUZ' THEN 'W5VZ1'
-                      WHEN 'ATIVA' THEN 'U1HZ'
-                      WHEN 'TRAZ' THEN 'Y5HZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5XZ'
-                      WHEN 'ALZA' THEN 'BP5XZ'
-                      WHEN 'AXIA' THEN 'CG1GZ'
-                      WHEN 'BEZZA' THEN 'AQ3XZ1'
-                      WHEN 'ARUZ' THEN 'W5VZ2'
-                      WHEN 'ATIVA' THEN 'U1VZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5VZ'
-                      WHEN 'AXIA' THEN 'CG1VZ'
-                      WHEN 'BEZZA' THEN 'AQ3VZ1'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5VZ'
-                      ELSE 'UNKNOWN'
-                  END
-              )
-        ) AS REG_COUNT
-    FROM TargetData t
-),
-ActualDataDlr AS (
-    SELECT 
-        t.[REGION],
-        t.OUTLET_CODE,
-        t.[MODEL],
-        ISNULL((
-            SELECT TOP 1 OTL2.SLS_COMP_NAME
-            FROM DM_GOLD.crkpi.OUTLET_TYPE OTL2
-            WHERE OTL2.SLS_CODE = t.OUTLET_CODE
-        ), 'No Name Registered') AS OUTLET_NAME,
-        (
-            SELECT COUNT(*) 
-            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
-            JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON AC2.COMPCODE = OTL2.SLS_CODE
-            WHERE MONTH(AC2.BOOKINGDATE) = TRY_CAST(@monthParam AS INT)
-              AND YEAR(AC2.BOOKINGDATE) = TRY_CAST(@yearParam AS INT)
-              AND AC2.COMPCODE = t.OUTLET_CODE
-              -- Modify or remove model matching rule below if your dealer table uses a different column
-            AND AC2.VML_MANUFACTURING_CODE IN (
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD3GZ'
-                      WHEN 'ALZA' THEN 'BP5HZ'
-                      WHEN 'AXIA' THEN 'CG1XZ'
-                      WHEN 'BEZZA' THEN 'AQ1GZ2'
-                      WHEN 'ARUZ' THEN 'W5XZ2'
-                      WHEN 'ATIVA' THEN 'U1XZ'
-                      WHEN 'TRAZ' THEN 'Y5XZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD3GZ1'
-                      WHEN 'ALZA' THEN 'BP5VZ'
-                      WHEN 'AXIA' THEN 'CG1SZ'
-                      WHEN 'BEZZA' THEN 'AQ1GX2'
-                      WHEN 'ARUZ' THEN 'W5VZ1'
-                      WHEN 'ATIVA' THEN 'U1HZ'
-                      WHEN 'TRAZ' THEN 'Y5HZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5XZ'
-                      WHEN 'ALZA' THEN 'BP5XZ'
-                      WHEN 'AXIA' THEN 'CG1GZ'
-                      WHEN 'BEZZA' THEN 'AQ3XZ1'
-                      WHEN 'ARUZ' THEN 'W5VZ2'
-                      WHEN 'ATIVA' THEN 'U1VZ'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5VZ'
-                      WHEN 'AXIA' THEN 'CG1VZ'
-                      WHEN 'BEZZA' THEN 'AQ3VZ1'
-                      ELSE 'UNKNOWN'
-                  END,
-                  CASE t.[MODEL]
-                      WHEN 'MYVI' THEN 'BD5VZ'
-                      ELSE 'UNKNOWN'
-                  END
-              )
-        ) AS REG_COUNT
-    FROM TargetData t
+        OTL2.Region_2 AS [REGION],
+        AC2.SALES_CENTER_CODE AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        CASE 
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BD3GZ', 'BD3GZ1', 'BD5XZ', 'BD5VZ') THEN 'MYVI'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BP5HZ', 'BP5VZ', 'BP5XZ') THEN 'ALZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('CG1XZ', 'CG1SZ', 'CG1GZ', 'CG1VZ') THEN 'AXIA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('AQ1GZ2', 'AQ1GX2', 'AQ3XZ1', 'AQ3VZ1') THEN 'BEZZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('W5XZ2', 'W5VZ1', 'W5VZ2') THEN 'ARUZ'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('U1XZ', 'U1HZ', 'U1VZ') THEN 'ATIVA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('Y5XZ', 'Y5HZ') THEN 'TRAZ'
+            ELSE 'UNKNOWN'
+        END AS [MODEL],
+        COUNT(*) AS ACTUAL_BKG_COUNT
+    FROM [DM_SILVER].[CRKPI].[Booking] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE
+    WHERE MONTH(AC2.BOOKING_DATE) = TRY_CAST(@monthParam AS INT)
+      AND YEAR(AC2.BOOKING_DATE) = TRY_CAST(@yearParam AS INT)
+      AND AC2.SALES_CENTER_CODE = @outletCodeParam
+    GROUP BY 
+        OTL2.Region_2,
+        AC2.SALES_CENTER_CODE,
+        OTL2.SLS_COMP_NAME,
+        CASE 
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BD3GZ', 'BD3GZ1', 'BD5XZ', 'BD5VZ') THEN 'MYVI'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BP5HZ', 'BP5VZ', 'BP5XZ') THEN 'ALZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('CG1XZ', 'CG1SZ', 'CG1GZ', 'CG1VZ') THEN 'AXIA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('AQ1GZ2', 'AQ1GX2', 'AQ3XZ1', 'AQ3VZ1') THEN 'BEZZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('W5XZ2', 'W5VZ1', 'W5VZ2') THEN 'ARUZ'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('U1XZ', 'U1HZ', 'U1VZ') THEN 'ATIVA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('Y5XZ', 'Y5HZ') THEN 'TRAZ'
+            ELSE 'UNKNOWN'
+        END
 )
 SELECT 
-    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
-    COALESCE(t.OUTLET_CODE, br.OUTLET_CODE, dlr.OUTLET_CODE) AS OUTLET_CODE,
-    COALESCE(br.OUTLET_NAME, dlr.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
-    COALESCE(t.[MODEL], br.[MODEL], dlr.[MODEL]) AS [MODEL],
+    COALESCE(t.[REGION], a.[REGION]) AS [REGION],
+    COALESCE(t.OUTLET_CODE, a.OUTLET_CODE) AS OUTLET_CODE,
+    COALESCE(a.OUTLET_NAME, t.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+    COALESCE(t.[MODEL], a.[MODEL]) AS [MODEL],
     
     ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
-    ISNULL(br.REG_COUNT, 0) AS ACTUAL_BKG_COUNT_BR,
-    ISNULL(dlr.REG_COUNT, 0) AS ACTUAL_BKG_COUNT_DLR,
-    
-    -- Combined Branch + Dealer booking counts
-    (ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) AS ACTUAL_BKG_COUNT,
+    ISNULL(a.ACTUAL_BKG_COUNT, 0) AS ACTUAL_BKG_COUNT,
     
     -- 1. No Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
-        ELSE CAST(ROUND(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+        ELSE CAST(ROUND((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
     END AS BKG_PCTG,
 
     -- 2. One Decimal Place
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
-        ELSE CAST(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
     END AS BKG_PCTG_1,
 
     -- 3. Two Decimal Places
     CASE 
         WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
-        ELSE CAST(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+        ELSE CAST((ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
     END AS BKG_PCTG_2
 
 FROM TargetData t
-FULL OUTER JOIN ActualDataBr br 
-    ON t.OUTLET_CODE = br.OUTLET_CODE AND t.[MODEL] = br.[MODEL]
-FULL OUTER JOIN ActualDataDlr dlr 
-    ON COALESCE(t.OUTLET_CODE, br.OUTLET_CODE) = dlr.OUTLET_CODE 
-   AND COALESCE(t.[MODEL], br.[MODEL]) = dlr.[MODEL]
+FULL OUTER JOIN ActualData a 
+    ON t.OUTLET_CODE = a.OUTLET_CODE AND t.[MODEL] = a.[MODEL]
+WHERE COALESCE(t.[MODEL], a.[MODEL]) <> 'UNKNOWN'
 
 ORDER BY BKG_PCTG_2 DESC;
 `);
@@ -3617,7 +5328,7 @@ ORDER BY BKG_PCTG_2 DESC;
             return item;
         });
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
 
 
 
@@ -3735,6 +5446,385 @@ ORDER BY actual_bkg_count DESC
     }
 });
 */
+
+// Aded by Firdaus - 24/11/2026
+router.get('/api/booking/month', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT COUNT(*) AS TOTAL_BKG_MONTH
+  FROM [DM_SILVER].[CRKPI].[Booking]
+  WHERE MONTH(BOOKING_DATE) = @monthParam
+  AND YEAR(BOOKING_DATE) = @yearParam;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/month  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+/**
+ * @openapi
+ * /api/booking/mnt_RegionOutletSummary:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking summary for outlets in a region
+ *     description: Retrieves total outlets, red-zone count, average achievement percentage, and top performing outlet for a region from DM_SILVER Booking.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code (e.g. C1, C2, EC1, EC2, EM, N, S, FMD).
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved regional booking outlet summary.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
+router.get('/api/booking/mnt_RegionOutletSummary', authenticate, async (req, res) => {
+    try {
+        const { month, year, region } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || 5;
+        const parsedYear = parseInt(year, 10) || 2025;
+        const parsedRegion = region || 'C1';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request()
+            .input('monthParam', parsedMonth)
+            .input('yearParam', parsedYear)
+            .input('regionParam', parsedRegion)
+            .query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'Booking' 
+      AND TR2.Month = @monthParam
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND OTL2.REGION_2 = @regionParam
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code], OTL2.SLS_COMP_NAME
+),
+ActualData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        OTL2.SLS_CODE AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        COUNT(*) AS BKG_COUNT
+    FROM [DM_SILVER].[CRKPI].[Booking] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
+      AND YEAR(AC2.BOOKING_DATE) = @yearParam
+      AND OTL2.REGION_2 = @regionParam
+    GROUP BY OTL2.Region_2, OTL2.SLS_CODE, OTL2.SLS_COMP_NAME
+),
+DetailedResults AS (
+    SELECT 
+        COALESCE(t.[REGION], a.[REGION]) AS [REGION],
+        COALESCE(t.OUTLET_CODE, a.OUTLET_CODE) AS OUTLET_CODE,
+        COALESCE(a.OUTLET_NAME, t.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+        ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
+        ISNULL(a.BKG_COUNT, 0) AS ACTUAL_BKG_COUNT,
+        CASE 
+            WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
+            ELSE CAST((ISNULL(a.BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+        END AS BKG_PCTG_2
+    FROM TargetData t
+    FULL OUTER JOIN ActualData a 
+        ON t.OUTLET_CODE = a.OUTLET_CODE
+),
+RankedResults AS (
+    SELECT 
+        OUTLET_CODE,
+        OUTLET_NAME,
+        BKG_PCTG_2,
+        COUNT(*) OVER() AS TOTAL_ROWS,
+        AVG(CAST(BKG_PCTG_2 AS FLOAT)) OVER() AS AVERAGE_BKG_PCTG,
+        SUM(CASE WHEN BKG_PCTG_2 < 50.00 THEN 1 ELSE 0 END) OVER() AS ROWS_BELOW_50,
+        ROW_NUMBER() OVER(ORDER BY BKG_PCTG_2 DESC, ACTUAL_BKG_COUNT DESC) AS RowNum
+    FROM DetailedResults
+)
+SELECT 
+    TOTAL_ROWS,
+    ROWS_BELOW_50,
+    CAST(ROUND(AVERAGE_BKG_PCTG, 0) AS INT) AS AVERAGE_BKG_PCTG,
+    CAST(AVERAGE_BKG_PCTG AS DECIMAL(10,1)) AS AVERAGE_BKG_PCTG_1,
+    CAST(AVERAGE_BKG_PCTG AS DECIMAL(10,2)) AS AVERAGE_BKG_PCTG_2,
+    OUTLET_CODE AS HIGHEST_OUTLET_CODE,
+    OUTLET_NAME AS HIGHEST_OUTLET_NAME,
+    BKG_PCTG_2 AS HIGHEST_BKG_PCTG
+FROM RankedResults
+WHERE RowNum = 1;
+`);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        const updatedRecords = result.recordset.map(item => {
+            if (item.HIGHEST_OUTLET_NAME && item.HIGHEST_OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    HIGHEST_OUTLET_NAME: item.HIGHEST_OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_RegionOutletSummary Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+});
+
+
+/**
+ * @openapi
+ * /api/booking/mnt_outletModelResult:
+ *   get:
+ *     tags:
+ *       - Booking
+ *     summary: Monthly booking model summary for an outlet
+ *     description: Retrieves summary statistics (total models, count below 50%, average achievement percentage, and lowest-performing model) for a specific outlet from DM_SILVER Booking.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Month number (1-12).
+ *       - in: query
+ *         name: year
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 2025
+ *         description: Target year (YYYY).
+ *       - in: query
+ *         name: region
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: C1
+ *         description: Region code.
+ *       - in: query
+ *         name: outletcode
+ *         required: false
+ *         schema:
+ *           type: string
+ *           default: '522105'
+ *         description: Sales center / outlet code.
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved outlet model booking summary metrics.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DataListResponse'
+ *       401:
+ *         description: Unauthorized - Missing, invalid, or expired JWT token.
+ *       500:
+ *         description: Database connection or query error.
+ */
+router.get('/api/booking/mnt_outletModelResult', authenticate, async (req, res) => {
+    try {
+        const { month, year, region, outletcode } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || 5;
+        const parsedYear = parseInt(year, 10) || 2025;
+        const parsedRegion = region || 'C1';
+        const parsedOutletCode = outletcode || '522105';
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request()
+            .input('monthParam', parsedMonth)
+            .input('yearParam', parsedYear)
+            .input('regionParam', parsedRegion)
+            .input('outletCodeParam', parsedOutletCode)
+            .query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END AS [MODEL],
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'Booking' 
+      AND TR2.Month = @monthParam
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND TR2.[Outlet Code] = @outletCodeParam
+    GROUP BY 
+        OTL2.Region_2, 
+        TR2.[Outlet Code], 
+        OTL2.SLS_COMP_NAME,
+        CASE 
+            WHEN LTRIM(RTRIM(TR2.Model)) = 'AXIA E' THEN 'AXIA'
+            ELSE LTRIM(RTRIM(TR2.Model))
+        END
+),
+ActualData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        AC2.SALES_CENTER_CODE AS OUTLET_CODE,
+        OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+        CASE 
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BD3GZ', 'BD3GZ1', 'BD5XZ', 'BD5VZ') THEN 'MYVI'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BP5HZ', 'BP5VZ', 'BP5XZ') THEN 'ALZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('CG1XZ', 'CG1SZ', 'CG1GZ', 'CG1VZ') THEN 'AXIA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('AQ1GZ2', 'AQ1GX2', 'AQ3XZ1', 'AQ3VZ1') THEN 'BEZZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('W5XZ2', 'W5VZ1', 'W5VZ2') THEN 'ARUZ'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('U1XZ', 'U1HZ', 'U1VZ') THEN 'ATIVA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('Y5XZ', 'Y5HZ') THEN 'TRAZ'
+            ELSE 'UNKNOWN'
+        END AS [MODEL],
+        COUNT(*) AS ACTUAL_BKG_COUNT
+    FROM [DM_SILVER].[CRKPI].[Booking] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE
+    WHERE MONTH(AC2.BOOKING_DATE) = TRY_CAST(@monthParam AS INT)
+      AND YEAR(AC2.BOOKING_DATE) = TRY_CAST(@yearParam AS INT)
+      AND AC2.SALES_CENTER_CODE = @outletCodeParam
+    GROUP BY 
+        OTL2.Region_2,
+        AC2.SALES_CENTER_CODE,
+        OTL2.SLS_COMP_NAME,
+        CASE 
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BD3GZ', 'BD3GZ1', 'BD5XZ', 'BD5VZ') THEN 'MYVI'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('BP5HZ', 'BP5VZ', 'BP5XZ') THEN 'ALZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('CG1XZ', 'CG1SZ', 'CG1GZ', 'CG1VZ') THEN 'AXIA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('AQ1GZ2', 'AQ1GX2', 'AQ3XZ1', 'AQ3VZ1') THEN 'BEZZA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('W5XZ2', 'W5VZ1', 'W5VZ2') THEN 'ARUZ'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('U1XZ', 'U1HZ', 'U1VZ') THEN 'ATIVA'
+            WHEN AC2.VML_MANUFACTURING_CODE IN ('Y5XZ', 'Y5HZ') THEN 'TRAZ'
+            ELSE 'UNKNOWN'
+        END
+),
+CalculatedData AS (
+    SELECT 
+        COALESCE(t.OUTLET_CODE, a.OUTLET_CODE) AS OUTLET_CODE,
+        COALESCE(a.OUTLET_NAME, t.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+        COALESCE(t.[MODEL], a.[MODEL]) AS [MODEL],
+        ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
+        ISNULL(a.ACTUAL_BKG_COUNT, 0) AS ACTUAL_BKG_COUNT,
+        CASE 
+            WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
+            ELSE (ISNULL(a.ACTUAL_BKG_COUNT, 0) * 100.0) / t.TARGET_BKG_COUNT
+        END AS BKG_PCTG
+    FROM TargetData t
+    FULL OUTER JOIN ActualData a 
+        ON t.OUTLET_CODE = a.OUTLET_CODE AND t.[MODEL] = a.[MODEL]
+    WHERE COALESCE(t.[MODEL], a.[MODEL]) <> 'UNKNOWN'
+)
+SELECT 
+    OUTLET_CODE,
+    MAX(OUTLET_NAME) AS OUTLET_NAME,
+    COUNT(*) AS TOTAL_ROWS,
+    SUM(CASE WHEN BKG_PCTG < 50 THEN 1 ELSE 0 END) AS ROWS_BELOW_50,
+    CAST(ROUND(AVG(BKG_PCTG), 0) AS INT) AS AVERAGE_BKG_PCTG,
+    CAST(AVG(BKG_PCTG) AS DECIMAL(10,1)) AS AVERAGE_BKG_PCTG_1,
+    CAST(AVG(BKG_PCTG) AS DECIMAL(10,2)) AS AVERAGE_BKG_PCTG_2,
+    (SELECT TOP 1 [MODEL] FROM CalculatedData ORDER BY BKG_PCTG ASC, [MODEL] ASC) AS LOWEST_MODEL
+FROM CalculatedData
+GROUP BY OUTLET_CODE;
+`);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        const updatedRecords = result.recordset.map(item => {
+            if (item.OUTLET_NAME && item.OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    OUTLET_NAME: item.OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_outletModelResult Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+});
 
 
 // end BMA (PRIME-GO) query
